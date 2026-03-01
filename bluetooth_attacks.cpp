@@ -3101,13 +3101,13 @@ void cleanup() {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TRACKER DETECT IMPLEMENTATION - Multi-Platform BLE Tracker Detection
+// STALKERWARE DETECT IMPLEMENTATION - Multi-Platform BLE Tracker Detection
 // Detects: Google FMDN (0xFEAA), Samsung SmartTag (0xFD5A), Tile (0xFEED),
 //          Chipolo (0xFE33), Apple AirTag (0x004C type 0x12)
 // Verified signatures from Bluetooth SIG Assigned Numbers & Google FMDN Spec
 // ═══════════════════════════════════════════════════════════════════════════
 
-namespace TrackerDetect {
+namespace StalkerwareDetect {
 
 #define TD_MAX_TRACKERS    20
 #define TD_MAX_VISIBLE     10
@@ -3275,7 +3275,7 @@ static void tdDrawIconBar() {
 
 static void tdDrawTitle() {
     tft.drawLine(0, 38, SCREEN_WIDTH, 38, HALEHOUND_HOTPINK);
-    drawGlitchTitle(58, "TRACKER");
+    drawGlitchTitle(58, "STALKERWARE");
     tft.drawLine(0, 62, SCREEN_WIDTH, 62, HALEHOUND_HOTPINK);
 }
 
@@ -3491,7 +3491,7 @@ static void processScanResults(BLEScanResults results) {
                     if (addOrUpdateDevice(mac, rssi, TRACKER_GOOGLE_FMDN, frameType)) {
                         foundNew = true;
                         #if CYD_DEBUG
-                        Serial.printf("[TRACKER] NEW Google FMDN: %s RSSI:%d frame:0x%02X\n",
+                        Serial.printf("[STALKERWARE] NEW Google FMDN: %s RSSI:%d frame:0x%02X\n",
                                       tdMacToStr(mac).c_str(), rssi, frameType);
                         #endif
                     }
@@ -3506,7 +3506,7 @@ static void processScanResults(BLEScanResults results) {
                     if (addOrUpdateDevice(mac, rssi, TRACKER_SAMSUNG_TAG, firstByte)) {
                         foundNew = true;
                         #if CYD_DEBUG
-                        Serial.printf("[TRACKER] NEW Samsung SmartTag: %s RSSI:%d status:0x%02X\n",
+                        Serial.printf("[STALKERWARE] NEW Samsung SmartTag: %s RSSI:%d status:0x%02X\n",
                                       tdMacToStr(mac).c_str(), rssi, firstByte);
                         #endif
                     }
@@ -3520,7 +3520,7 @@ static void processScanResults(BLEScanResults results) {
                     if (addOrUpdateDevice(mac, rssi, TRACKER_TILE, (uint8_t)sd[0])) {
                         foundNew = true;
                         #if CYD_DEBUG
-                        Serial.printf("[TRACKER] NEW Tile: %s RSSI:%d\n",
+                        Serial.printf("[STALKERWARE] NEW Tile: %s RSSI:%d\n",
                                       tdMacToStr(mac).c_str(), rssi);
                         #endif
                     }
@@ -3534,7 +3534,7 @@ static void processScanResults(BLEScanResults results) {
                 if (addOrUpdateDevice(mac, rssi, TRACKER_CHIPOLO, sb)) {
                     foundNew = true;
                     #if CYD_DEBUG
-                    Serial.printf("[TRACKER] NEW Chipolo: %s RSSI:%d\n",
+                    Serial.printf("[STALKERWARE] NEW Chipolo: %s RSSI:%d\n",
                                   tdMacToStr(mac).c_str(), rssi);
                     #endif
                 }
@@ -3556,7 +3556,7 @@ static void processScanResults(BLEScanResults results) {
                     if (addOrUpdateDevice(mac, rssi, TRACKER_APPLE_AIRTAG, statusByte)) {
                         foundNew = true;
                         #if CYD_DEBUG
-                        Serial.printf("[TRACKER] NEW Apple AirTag: %s RSSI:%d status:0x%02X\n",
+                        Serial.printf("[STALKERWARE] NEW Apple AirTag: %s RSSI:%d status:0x%02X\n",
                                       tdMacToStr(mac).c_str(), rssi, statusByte);
                         #endif
                     }
@@ -3591,7 +3591,7 @@ void setup() {
     if (initialized) return;
 
     #if CYD_DEBUG
-    Serial.println("[TRACKER] Initializing multi-tracker detector...");
+    Serial.println("[STALKERWARE] Initializing multi-tracker detector...");
     #endif
 
     deviceCount = 0;
@@ -3613,7 +3613,7 @@ void setup() {
 
     pTdScan = BLEDevice::getScan();
     if (!pTdScan) {
-        Serial.println("[TRACKER] ERROR: getScan() returned NULL");
+        Serial.println("[STALKERWARE] ERROR: getScan() returned NULL");
         tft.setTextColor(HALEHOUND_HOTPINK);
         tft.setCursor(10, 100);
         tft.print("BLE INIT FAILED");
@@ -3634,7 +3634,7 @@ void setup() {
     drawDeviceList();
 
     #if CYD_DEBUG
-    Serial.println("[TRACKER] Multi-tracker detector ready");
+    Serial.println("[STALKERWARE] Multi-tracker detector ready");
     #endif
 }
 
@@ -3737,11 +3737,11 @@ void cleanup() {
     deviceCount = 0;
 
     #if CYD_DEBUG
-    Serial.println("[TRACKER] Cleanup complete");
+    Serial.println("[STALKERWARE] Cleanup complete");
     #endif
 }
 
-}  // namespace TrackerDetect
+}  // namespace StalkerwareDetect
 
 
 // ═══════════════════════════════════════════════════════════════════════════

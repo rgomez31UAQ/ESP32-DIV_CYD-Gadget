@@ -130,7 +130,7 @@ const char *bluetooth_submenu_items[bluetooth_NUM_SUBMENU_ITEMS] = {
     "BLE Scanner",
     "WhisperPair",
     "AirTag Detect",
-    "Tracker Detect",
+    "Stalkerware Detect",
     "Back to Main Menu"
 };
 
@@ -841,14 +841,14 @@ void handleBluetoothSubmenuTouch() {
                     }
                     AirTagDetect::cleanup();
                     break;
-                case 7: // Tracker Detect (Multi-platform)
-                    TrackerDetect::setup();
+                case 7: // Stalkerware Detect (Multi-platform)
+                    StalkerwareDetect::setup();
                     while (!feature_exit_requested) {
-                        TrackerDetect::loop();
-                        if (TrackerDetect::isExitRequested()) feature_exit_requested = true;
+                        StalkerwareDetect::loop();
+                        if (StalkerwareDetect::isExitRequested()) feature_exit_requested = true;
                         if (digitalRead(0) == LOW) feature_exit_requested = true;
                     }
-                    TrackerDetect::cleanup();
+                    StalkerwareDetect::cleanup();
                     break;
             }
 

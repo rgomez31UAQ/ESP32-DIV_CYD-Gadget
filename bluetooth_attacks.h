@@ -199,12 +199,12 @@ void cleanup();
 }  // namespace AirTagDetect
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TRACKER DETECT - Multi-Platform Tracker Detection
+// STALKERWARE DETECT - Multi-Platform Tracker Detection
 // Scans for Google FMDN (0xFEAA), Samsung SmartTag (0xFD5A), Tile (0xFEED),
 // Chipolo (0xFE33), and Apple AirTag (0x004C) trackers via BLE advertisements
 // ═══════════════════════════════════════════════════════════════════════════
 
-namespace TrackerDetect {
+namespace StalkerwareDetect {
 
 // Initialize detector and start scanning
 void setup();
@@ -218,7 +218,7 @@ bool isExitRequested();
 // Cleanup and release BLE resources
 void cleanup();
 
-}  // namespace TrackerDetect
+}  // namespace StalkerwareDetect
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BLE JAMMER - 2.4GHz BLE Jammer using NRF24L01+PA+LNA
