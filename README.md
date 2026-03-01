@@ -1108,6 +1108,10 @@ Based on the ESP32-DIV project. HaleHound Edition includes 8 new features, 17 bu
 
 GitHub: [github.com/JesseCHale/HaleHound-CYD](https://github.com/JesseCHale/HaleHound-CYD)
 
+### Community Contributors
+
+**Duggie** — Stalkerware Detect concept, EAPOL back button bug report
+
 ---
 
 *I built this.*
