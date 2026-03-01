@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // HaleHound-CYD Main Firmware
 // ESP32 Cheap Yellow Display Edition
-// v3.0.0 — Dual-core engine, SubGHz Analyzer overhaul, Evil Twin SD logging
+// v3.1.0 — Stalkerware Detect, EAPOL back button fix, Duggie contributor
 // Created: 2026-02-06
 // ═══════════════════════════════════════════════════════════════════════════
 //

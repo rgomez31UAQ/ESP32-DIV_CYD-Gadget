@@ -44,7 +44,7 @@
 
 **ESP32-DIV HaleHound Edition for Cheap Yellow Display**
 
-Version **v3.0.0 CYD Edition** | By [JesseCHale](https://github.com/JesseCHale)
+Version **v3.1.0 CYD Edition** | By [JesseCHale](https://github.com/JesseCHale)
 
 ---
 
@@ -247,7 +247,7 @@ The MicroSD slot is **built into the CYD board** on the back. No external wiring
 ## Menu Tree
 
 ```
-HALEHOUND-CYD v3.0.0
+HALEHOUND-CYD v3.1.0
 │
 ├── WiFi ──────────────────────────────────────────────────
 │   ├── Packet Monitor ......... Real-time 802.11 frame capture
@@ -268,6 +268,7 @@ HALEHOUND-CYD v3.0.0
 │   ├── BLE Scanner ............ Discover nearby BLE devices
 │   ├── WhisperPair ............ CVE-2025-36911 Fast Pair scanner
 │   ├── AirTag Detect .......... Apple FindMy tracker detection
+│   ├── Stalkerware Detect ..... Multi-platform tracker scanner
 │   └── Back to Main Menu
 │
 ├── 2.4GHz (NRF24) ───────────────────────────────────────
@@ -512,6 +513,31 @@ Passive BLE scanner that detects AirTags, FindMy accessories, and compatible thi
 - 150ms delay between `BLEDevice::init()` and `esp_ble_tx_power_set()` to prevent crash
 - `esp_wifi_stop()` before BLE init is sufficient — do NOT call `esp_wifi_deinit()`
 - All BLE TX at `ESP_PWR_LVL_P9` (maximum)
+
+---
+
+#### Stalkerware Detect — Multi-Platform BLE Tracker Scanner
+
+Scans for commercial BLE tracking devices across all major platforms. Identifies Google Find My Device Network (FMDN) trackers via service UUID `0xFEAA`, Samsung SmartTag via `0xFD5A`, Tile via `0xFEED`, Chipolo via `0xFE33`, and Apple AirTag via manufacturer ID `0x004C` with FindMy type bytes. Displays detected trackers in a scrollable list view with platform icon, name, RSSI proximity bars, and signal strength. Select any tracker for a detail view showing MAC address, platform, RSSI, battery level estimate, and status info. Auto-rescans every 5 seconds with alert flash on new tracker detection. Tracks up to 20 unique devices simultaneously.
+
+```
+┌──────────────────────────────────────────────┐
+│  DETECTION METHOD                            │
+│                                              │
+│  1. BLE scan for tracker service UUIDs       │
+│  2. Match: Google FMDN (0xFEAA)             │
+│  3. Match: Samsung SmartTag (0xFD5A)         │
+│  4. Match: Tile (0xFEED)                     │
+│  5. Match: Chipolo (0xFE33)                  │
+│  6. Match: Apple AirTag (0x004C + FindMy)    │
+│  7. List view with RSSI proximity bars       │
+│  8. Detail view per tracker                  │
+│  9. Auto-rescan every 5 seconds              │
+│  10. Alert flash on new tracker detection    │
+└──────────────────────────────────────────────┘
+```
+
+*Concept: Duggie*
 
 ---
 
@@ -1107,6 +1133,10 @@ Managed by PlatformIO (`lib_deps` in `platformio.ini`):
 Based on the ESP32-DIV project. HaleHound Edition includes 8 new features, 17 bug fixes, hardware pin corrections (CC1101 TX/RX swap fix), full touchscreen support, SIGINT suite, and the CYD hardware port.
 
 GitHub: [github.com/JesseCHale/HaleHound-CYD](https://github.com/JesseCHale/HaleHound-CYD)
+
+### Community Contributors
+
+**Duggie** — Stalkerware Detect concept, EAPOL back button bug report
 
 ---
 
