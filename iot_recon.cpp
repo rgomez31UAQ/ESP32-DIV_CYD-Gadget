@@ -135,7 +135,8 @@ enum IotScreen : uint8_t {
     IOT_SCR_KEYBOARD_PASS,
     IOT_SCR_CONNECTING,
     IOT_SCR_SCANNING,
-    IOT_SCR_DETAIL
+    IOT_SCR_DETAIL,
+    IOT_SCR_CREDS
 };
 static IotScreen currentScreen = IOT_SCR_WIFI_SCAN;
 
@@ -161,6 +162,16 @@ struct WifiNet {
 static WifiNet foundNetworks[IOT_MAX_NETWORKS];
 static int networkCount = 0;
 static int networkScroll = 0;
+
+// Captured credentials (read from SD /creds.txt)
+#define IOT_MAX_CREDS 10
+struct CapturedCred {
+    char ssid[33];
+    char psk[65];
+};
+static CapturedCred capturedCreds[IOT_MAX_CREDS];
+static int capturedCredCount = 0;
+static int credScroll = 0;
 
 // Detail view
 static int detailDeviceIdx = -1;
@@ -191,6 +202,9 @@ static void initPlague();
 static void saveReportToSD();
 static bool tryWiFiConnect();
 static void doWifiScan();
+static void loadCapturedCreds();
+static void drawCredsScreen();
+static void handleCredsTouch(int x, int y);
 
 // =============================================================================
 // HELPER: Base64 encode for HTTP Basic Auth
@@ -252,6 +266,12 @@ static void addKillLine(const char* text, uint16_t color) {
         strncpy(killFeed[IOT_MAX_KILL_LINES - 1].text, text, sizeof(killFeed[0].text) - 1);
         killFeed[IOT_MAX_KILL_LINES - 1].text[sizeof(killFeed[0].text) - 1] = '\0';
         killFeed[IOT_MAX_KILL_LINES - 1].color = color;
+    }
+    // Auto-scroll to show latest
+    int feedH = SCALE_Y(290) - SCALE_Y(120);
+    int maxLines = feedH / 12;
+    if (killFeedCount > maxLines) {
+        killFeedScroll = killFeedCount - maxLines;
     }
     killFeedDirty = true;
 }
@@ -1218,6 +1238,162 @@ static void saveReportToSD() {
 }
 
 // =============================================================================
+// LOAD CAPTURED CREDS FROM SD (/creds.txt)
+// Format: [PSK] SSID | password | BSSID | CH
+// =============================================================================
+
+static void loadCapturedCreds() {
+    capturedCredCount = 0;
+    spiDeselect();
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+
+    if (!SD.begin(SD_CS)) {
+        SPI.begin(18, 19, 23, SD_CS);
+        if (!SD.begin(SD_CS, SPI, 4000000)) {
+            return;
+        }
+    }
+
+    File f = SD.open("/creds.txt", FILE_READ);
+    if (!f) { SD.end(); return; }
+
+    while (f.available() && capturedCredCount < IOT_MAX_CREDS) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (!line.startsWith("[PSK]")) continue;
+
+        // Parse: [PSK] SSID | password | BSSID | CH
+        int p1 = line.indexOf('|');
+        if (p1 < 0) continue;
+        int p2 = line.indexOf('|', p1 + 1);
+        if (p2 < 0) continue;
+
+        String ssid = line.substring(6, p1); // After "[PSK] "
+        ssid.trim();
+        String psk = line.substring(p1 + 1, p2);
+        psk.trim();
+
+        if (ssid.length() == 0 || psk.length() == 0) continue;
+
+        strncpy(capturedCreds[capturedCredCount].ssid, ssid.c_str(), 32);
+        capturedCreds[capturedCredCount].ssid[32] = '\0';
+        strncpy(capturedCreds[capturedCredCount].psk, psk.c_str(), 64);
+        capturedCreds[capturedCredCount].psk[64] = '\0';
+        capturedCredCount++;
+    }
+
+    f.close();
+    SD.end();
+}
+
+// =============================================================================
+// DISPLAY: Captured Creds Screen
+// =============================================================================
+
+static void drawCredsScreen() {
+    tft.fillScreen(HALEHOUND_BLACK);
+    drawStatusBar();
+    drawInoIconBar();
+
+    drawGlitchTitle(SCALE_Y(55), "IoT RECON");
+    drawGlitchStatus(SCALE_Y(80), "HARVESTED", HALEHOUND_HOTPINK);
+
+    if (capturedCredCount == 0) {
+        tft.setTextColor(HALEHOUND_GUNMETAL);
+        tft.setTextSize(1);
+        tft.setCursor(5, SCALE_Y(110));
+        tft.print("No PSK creds on SD card.");
+        tft.setCursor(5, SCALE_Y(125));
+        tft.print("Run Evil Twin first to");
+        tft.setCursor(5, SCALE_Y(140));
+        tft.print("harvest WiFi passwords.");
+    } else {
+        int listY = SCALE_Y(100);
+        int lineH = SCALE_H(28);
+        int visibleLines = (SCALE_Y(280) - listY) / lineH;
+
+        for (int i = credScroll; i < capturedCredCount && (i - credScroll) < visibleLines; i++) {
+            int y = listY + (i - credScroll) * lineH;
+
+            // Background highlight
+            tft.fillRect(3, y, SCREEN_WIDTH - 6, lineH - 2, HALEHOUND_DARK);
+            tft.drawRect(3, y, SCREEN_WIDTH - 6, lineH - 2, HALEHOUND_MAGENTA);
+
+            // SSID
+            tft.setTextColor(HALEHOUND_CYAN);
+            tft.setTextSize(1);
+            tft.setCursor(8, y + 3);
+            String ssidDisp = String(capturedCreds[i].ssid);
+            if (ssidDisp.length() > 20) ssidDisp = ssidDisp.substring(0, 20);
+            tft.print(ssidDisp);
+
+            // PSK (masked with first/last 2 chars visible)
+            tft.setTextColor(HALEHOUND_HOTPINK);
+            tft.setCursor(8, y + 14);
+            String psk = String(capturedCreds[i].psk);
+            if (psk.length() > 4) {
+                tft.printf("%c%c***%c%c", psk[0], psk[1], psk[psk.length()-2], psk[psk.length()-1]);
+            } else {
+                tft.print("****");
+            }
+        }
+    }
+
+    // Back button
+    int btnY = SCALE_Y(290);
+    int btnW = SCALE_W(70);
+    int btnH = SCALE_H(22);
+
+    tft.fillRoundRect(5, btnY, btnW, btnH, 3, HALEHOUND_DARK);
+    tft.drawRoundRect(5, btnY, btnW, btnH, 3, HALEHOUND_HOTPINK);
+    tft.setTextColor(HALEHOUND_HOTPINK);
+    tft.setCursor(22, btnY + btnH / 3);
+    tft.print("Back");
+}
+
+static void handleCredsTouch(int x, int y) {
+    // Back icon bar
+    if (y >= (ICON_BAR_Y - 2) && y <= (ICON_BAR_BOTTOM + 4) && x >= 5 && x <= 30) {
+        currentScreen = IOT_SCR_WIFI_SCAN;
+        drawWifiScanScreen();
+        waitForTouchRelease();
+        return;
+    }
+
+    // Tap a credential to use it
+    int listY = SCALE_Y(100);
+    int lineH = SCALE_H(28);
+    int visibleLines = (SCALE_Y(280) - listY) / lineH;
+
+    for (int i = 0; i < visibleLines && (i + credScroll) < capturedCredCount; i++) {
+        int itemY = listY + i * lineH;
+        if (y >= itemY && y < itemY + lineH) {
+            int idx = i + credScroll;
+            strncpy(targetSSID, capturedCreds[idx].ssid, 32);
+            targetSSID[32] = '\0';
+            strncpy(targetPass, capturedCreds[idx].psk, 64);
+            targetPass[64] = '\0';
+            currentScreen = IOT_SCR_CONNECTING;
+            drawConnectingScreen();
+            waitForTouchRelease();
+            return;
+        }
+    }
+
+    // Back button
+    int btnY = SCALE_Y(290);
+    int btnW = SCALE_W(70);
+    int btnH = SCALE_H(22);
+    if (x >= 5 && x <= 5 + btnW && y >= btnY && y <= btnY + btnH + 3) {
+        currentScreen = IOT_SCR_WIFI_SCAN;
+        drawWifiScanScreen();
+        waitForTouchRelease();
+        return;
+    }
+}
+
+// =============================================================================
 // DISPLAY: WiFi Network Picker
 // =============================================================================
 
@@ -1288,12 +1464,20 @@ static void drawWifiScanScreen() {
     tft.print("Rescan");
 
     // Manual entry button
-    int manX = SCALE_X(85);
-    tft.fillRoundRect(manX, btnY, btnW + SCALE_W(20), btnH, 3, HALEHOUND_DARK);
-    tft.drawRoundRect(manX, btnY, btnW + SCALE_W(20), btnH, 3, HALEHOUND_MAGENTA);
+    int manX = SCALE_X(82);
+    tft.fillRoundRect(manX, btnY, btnW, btnH, 3, HALEHOUND_DARK);
+    tft.drawRoundRect(manX, btnY, btnW, btnH, 3, HALEHOUND_MAGENTA);
     tft.setTextColor(HALEHOUND_MAGENTA);
-    tft.setCursor(manX + 8, btnY + btnH / 3);
-    tft.print("Manual SSID");
+    tft.setCursor(manX + 6, btnY + btnH / 3);
+    tft.print("Manual");
+
+    // Captured creds button
+    int credX = SCALE_X(162);
+    tft.fillRoundRect(credX, btnY, btnW, btnH, 3, HALEHOUND_DARK);
+    tft.drawRoundRect(credX, btnY, btnW, btnH, 3, HALEHOUND_GREEN);
+    tft.setTextColor(HALEHOUND_GREEN);
+    tft.setCursor(credX + 8, btnY + btnH / 3);
+    tft.print("Creds");
 }
 
 // =============================================================================
@@ -1660,12 +1844,11 @@ static void drawKillFeed() {
     // Draw separator
     tft.drawLine(0, feedY - 1, SCREEN_WIDTH, feedY - 1, HALEHOUND_HOTPINK);
 
-    int startIdx = 0;
-    if (killFeedCount > maxLines) {
-        startIdx = killFeedCount - maxLines + killFeedScroll;
-        if (startIdx < 0) startIdx = 0;
-        if (startIdx > killFeedCount - maxLines) startIdx = killFeedCount - maxLines;
+    int startIdx = killFeedScroll;
+    if (startIdx + maxLines > killFeedCount) {
+        startIdx = killFeedCount - maxLines;
     }
+    if (startIdx < 0) startIdx = 0;
 
     tft.setTextSize(1);
     for (int i = startIdx; i < killFeedCount && (i - startIdx) < maxLines; i++) {
@@ -1679,10 +1862,12 @@ static void drawKillFeed() {
     int btnY = SCALE_Y(292);
     tft.fillRect(0, btnY, SCREEN_WIDTH, SCREEN_HEIGHT - btnY, HALEHOUND_DARK);
 
-    // Scroll indicators
+    // Scroll buttons
     tft.setTextColor(HALEHOUND_MAGENTA);
     tft.setCursor(5, btnY + 4);
-    tft.print("^ v SCROLL");
+    tft.print("UP");
+    tft.setCursor(SCALE_X(55), btnY + 4);
+    tft.print("DN");
 
     // Save button
     tft.setCursor(SCALE_X(120), btnY + 4);
@@ -1846,11 +2031,22 @@ static void handleWifiScanTouch(int x, int y) {
     }
 
     // Manual SSID
-    int manX = SCALE_X(85);
-    if (x >= manX && x <= manX + btnW + SCALE_W(20) && y >= btnY && y <= btnY + btnH + 3) {
+    int manX = SCALE_X(82);
+    if (x >= manX && x <= manX + btnW && y >= btnY && y <= btnY + btnH + 3) {
         kbInput = "";
         currentScreen = IOT_SCR_KEYBOARD_SSID;
         drawKeyboardScreen("Enter SSID:", 32);
+        waitForTouchRelease();
+        return;
+    }
+
+    // Captured Creds (from Evil Twin)
+    int credX = SCALE_X(162);
+    if (x >= credX && x <= credX + btnW && y >= btnY && y <= btnY + btnH + 3) {
+        loadCapturedCreds();
+        credScroll = 0;
+        currentScreen = IOT_SCR_CREDS;
+        drawCredsScreen();
         waitForTouchRelease();
         return;
     }
@@ -1917,10 +2113,21 @@ static void handleScanScreenTouch(int x, int y) {
     // Bottom bar
     int btnBarY = SCALE_Y(292);
 
-    // Scroll up
+    // Scroll — left side of bottom bar
     if (y >= btnBarY && x < SCALE_X(50)) {
-        if (killFeedScroll > -(killFeedCount - 1)) {
+        // Scroll UP (see older messages)
+        if (killFeedScroll > 0) {
             killFeedScroll--;
+            killFeedDirty = true;
+        }
+        return;
+    }
+    if (y >= btnBarY && x >= SCALE_X(50) && x < SCALE_X(100)) {
+        // Scroll DOWN (see newer messages)
+        int feedH = SCALE_Y(290) - SCALE_Y(120);
+        int maxLines = feedH / 12;
+        if (killFeedCount > maxLines && killFeedScroll < killFeedCount - maxLines) {
+            killFeedScroll++;
             killFeedDirty = true;
         }
         return;
@@ -2035,6 +2242,12 @@ void loop() {
             }
             if (touched) {
                 handleWifiScanTouch(tx, ty);
+            }
+            break;
+
+        case IOT_SCR_CREDS:
+            if (touched) {
+                handleCredsTouch(tx, ty);
             }
             break;
 
