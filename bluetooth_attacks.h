@@ -155,9 +155,9 @@ void cleanup();
 }  // namespace BleSniffer
 
 // ═══════════════════════════════════════════════════════════════════════════
-// WHISPERPAIR - CVE-2025-36911 Fast Pair Vulnerability Scanner
-// Scans for Google Fast Pair devices and probes for WhisperPair vulnerability
+// WHISPERPAIR - CVE-2025-36911 Fast Pair Exploit Chain
 // Phase 1: Discovery + GATT Service Probe
+// Phase 2: Multi-Strategy KBP Exploit + BR/EDR Extraction + Account Key Injection
 // ═══════════════════════════════════════════════════════════════════════════
 
 namespace WhisperPair {

