@@ -17,6 +17,7 @@
 #include <SD.h>
 #include <Preferences.h>
 #include <arduinoFFT.h>
+#include "esp_bt.h"
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PACKET MONITOR IMPLEMENTATION
@@ -695,8 +696,13 @@ void cleanup() {
     // Stop Core 0 FFT task first
     stopFftTask();
 
+    // Full ESP-IDF level teardown — PM inits WiFi via raw esp_wifi_init/start,
+    // so Arduino WiFi.mode(WIFI_OFF) alone won't properly release the radio.
+    // Must use esp_wifi_stop() + esp_wifi_deinit() to match the raw init.
     esp_wifi_set_promiscuous(false);
     esp_wifi_set_promiscuous_rx_cb(NULL);
+    esp_wifi_stop();
+    esp_wifi_deinit();
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
     delay(50);
@@ -1541,7 +1547,7 @@ void wifiAPInit() {
 
 void wifiCleanup() {
     // Full radio teardown — call BEFORE any WiFi module init
-    // Handles any prior state: promiscuous, STA, AP, APSTA, raw ESP-IDF
+    // Handles any prior state: promiscuous, STA, AP, APSTA, raw ESP-IDF, AND BLE
 
     // 1. Kill promiscuous mode if it was on
     esp_wifi_set_promiscuous(false);
@@ -1552,7 +1558,14 @@ void wifiCleanup() {
     WiFi.mode(WIFI_OFF);
     delay(50);
 
-    // 3. ESP-IDF level teardown — stop and deinit regardless of current state
+    // 3. Release BT controller if a BLE module left it initialized
+    //    BLEDevice::deinit(false) only disables the controller, doesn't deinit it
+    //    Controller holds ~60KB + radio resources that WiFi needs
+    //    Returns ESP_ERR_INVALID_STATE if already deinited — harmless
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
+
+    // 4. ESP-IDF level teardown — stop and deinit regardless of current state
     //    These may return errors if already stopped/deinited — that's fine
     esp_wifi_stop();
     esp_wifi_deinit();

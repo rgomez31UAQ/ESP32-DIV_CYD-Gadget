@@ -3029,6 +3029,10 @@ void setup() {
     drawIconBar();
     drawTitle();
 
+    // Tear down WiFi before BLE init — frees radio + heap if WiFi was active
+    WiFi.mode(WIFI_OFF);
+    delay(50);
+
     // Init BLE
     releaseClassicBtMemory();
     BLEDevice::init("");
@@ -3055,6 +3059,10 @@ void setup() {
     tft.print("[*] Scanning for trackers...");
     runScan();
     drawTrackerList();
+
+    // Consume any lingering touch from menu selection — prevents
+    // isBackButtonTapped() in .ino from immediately exiting
+    waitForTouchRelease();
 
     #if CYD_DEBUG
     Serial.println("[AIRTAG] Detector ready");
@@ -3675,6 +3683,10 @@ void setup() {
     tdDrawIconBar();
     tdDrawTitle();
 
+    // Tear down WiFi before BLE init — frees radio + heap if WiFi was active
+    WiFi.mode(WIFI_OFF);
+    delay(50);
+
     // Init BLE
     releaseClassicBtMemory();
     BLEDevice::init("");
@@ -3701,6 +3713,10 @@ void setup() {
     tft.print("[*] Scanning for trackers...");
     tdRunScan();
     drawDeviceList();
+
+    // Consume any lingering touch from menu selection — prevents
+    // isBackButtonTapped() in .ino from immediately exiting
+    waitForTouchRelease();
 
     #if CYD_DEBUG
     Serial.println("[LUNATIC] Multi-tracker detector ready");
@@ -6956,6 +6972,10 @@ void setup() {
     drawStatusBar();
     wpDrawHeader();
 
+    // Tear down WiFi before BLE init — frees radio + heap if WiFi was active
+    WiFi.mode(WIFI_OFF);
+    delay(50);
+
     releaseClassicBtMemory();
     BLEDevice::init("");
     delay(150);
@@ -6981,6 +7001,10 @@ void setup() {
     wpInit = true;
 
     wpDoScan();
+
+    // Consume any lingering touch from menu selection — prevents
+    // isBackButtonTapped() in .ino from immediately exiting
+    waitForTouchRelease();
 
     #if CYD_DEBUG
     Serial.printf("[WP] Init complete — %d FP devices found\n", wpCount);
