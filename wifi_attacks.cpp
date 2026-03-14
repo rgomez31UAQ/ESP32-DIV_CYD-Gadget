@@ -5746,16 +5746,15 @@ static void cpDeauthTask(void* param) {
             break;
         }
 
-        // Consecutive failure recovery — restart WiFi subsystem
+        // Consecutive failure recovery — re-set channel (DO NOT esp_wifi_stop/start
+        // here! That kills the Evil Twin AP. The AP and deauth share the WiFi
+        // subsystem — stopping WiFi murders the hotspot.)
         if (cpDeauthFailStreak > 10) {
             #if CYD_DEBUG
-            Serial.println("[PORTAL] Core 0: 10+ failures — restarting WiFi");
+            Serial.println("[PORTAL] Core 0: 10+ failures — re-setting channel");
             #endif
-            esp_wifi_stop();
-            vTaskDelay(200 / portTICK_PERIOD_MS);
-            esp_wifi_start();
-            vTaskDelay(200 / portTICK_PERIOD_MS);
             esp_wifi_set_channel(targetChannel, WIFI_SECOND_CHAN_NONE);
+            vTaskDelay(100 / portTICK_PERIOD_MS);
             cpDeauthFailStreak = 0;
         }
 
