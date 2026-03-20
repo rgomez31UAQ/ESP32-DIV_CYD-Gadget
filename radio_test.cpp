@@ -1,9 +1,11 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // HaleHound-CYD Radio Test Tool
-// Interactive SPI radio hardware verification (NRF24L01+ and CC1101)
+// Interactive hardware verification for NRF24L01+, CC1101, and GPS
 // Tap a radio name to run its test. Results show inline as PASS/FAIL.
 // Includes wiring reference diagrams.
 // Created: 2026-02-19
+// Updated: 2026-03-20 — NRF24 spectrum scan + TX test,
+//                        CC1101 signal detection, GPS test (from Duggie)
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "radio_test.h"
@@ -12,8 +14,11 @@
 #include "utils.h"
 #include "touch_buttons.h"
 #include "icon.h"
+#include "nrf24_config.h"
+#include "gps_module.h"
 #include <SPI.h>
 #include <TFT_eSPI.h>
+#include <RF24.h>
 #include <ELECHOUSE_CC1101_SRC_DRV.h>
 
 extern TFT_eSPI tft;
@@ -22,29 +27,39 @@ extern TFT_eSPI tft;
 extern void drawStatusBar();
 extern void drawInoIconBar();
 
+// Forward declaration for drawMainScreen (defined later in this file)
+static void drawMainScreen();
+
 // ═══════════════════════════════════════════════════════════════════════════
 // SCREEN LAYOUT CONSTANTS
+// 4 test buttons + wiring button, tighter spacing than before
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Title at Y=60 (drawGlitchTitle)
-// NRF24 button:   Y=85..108
-// NRF24 status:   Y=110 (two lines: result + troubleshoot hint)
-// CC1101 button:  Y=140..163
-// CC1101 status:  Y=165 (two lines)
-// Wiring button:  Y=200..223
-// Hint:           Y=230
+// NRF24 button:   Y=80..99    (20px tall)
+// NRF24 status:   Y=101 (one line)
+// CC1101 button:  Y=115..134  (20px tall)
+// CC1101 status:  Y=136 (one line)
+// GPS button:     Y=150..169  (20px tall)
+// GPS status:     Y=171 (one line)
+// Wiring button:  Y=190..209  (20px tall)
+// Hint:           Y=215
 
-#define RT_NRF_BTN_Y     SCALE_Y(85)
-#define RT_NRF_BTN_H     SCALE_H(23)
-#define RT_NRF_STATUS_Y  SCALE_Y(110)
-#define RT_NRF_HINT_Y    SCALE_Y(122)
-#define RT_CC_BTN_Y      SCALE_Y(140)
-#define RT_CC_BTN_H      SCALE_H(23)
-#define RT_CC_STATUS_Y   SCALE_Y(165)
-#define RT_CC_HINT_Y     SCALE_Y(177)
-#define RT_WIRE_BTN_Y    SCALE_Y(200)
-#define RT_WIRE_BTN_H    SCALE_H(23)
-#define RT_HINT_Y        SCALE_Y(230)
+#define RT_NRF_BTN_Y     SCALE_Y(80)
+#define RT_NRF_BTN_H     SCALE_H(20)
+#define RT_NRF_STATUS_Y  SCALE_Y(101)
+#define RT_NRF_HINT_Y    SCALE_Y(112)
+#define RT_CC_BTN_Y      SCALE_Y(126)
+#define RT_CC_BTN_H      SCALE_H(20)
+#define RT_CC_STATUS_Y   SCALE_Y(147)
+#define RT_CC_HINT_Y     SCALE_Y(158)
+#define RT_GPS_BTN_Y     SCALE_Y(172)
+#define RT_GPS_BTN_H     SCALE_H(20)
+#define RT_GPS_STATUS_Y  SCALE_Y(193)
+#define RT_GPS_HINT_Y    SCALE_Y(204)
+#define RT_WIRE_BTN_Y    SCALE_Y(222)
+#define RT_WIRE_BTN_H    SCALE_H(20)
+#define RT_HINT_Y        SCALE_Y(248)
 #define RT_BTN_X          10
 #define RT_BTN_W         (SCREEN_WIDTH - 20)
 
@@ -123,7 +138,7 @@ static void rawNrfWrite(byte reg, byte val) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// NRF24 TEST — with smart failure diagnostics
+// NRF24 TEST — SPI check + spectrum scan + TX test (from Duggie)
 // ═══════════════════════════════════════════════════════════════════════════
 
 static void runNrfTest(int statusY, int hintY) {
@@ -132,7 +147,7 @@ static void runNrfTest(int statusY, int hintY) {
     deselectAllCS();
     spiReset4MHz();
 
-    // Step 1: Read STATUS register — 3 attempts with increasing delays
+    // ── STAGE 1: SPI register check (existing proven logic) ──
     bool statusOK = false;
     byte statusVal = 0x00;
     int nrfDelays[] = {10, 100, 500};
@@ -149,12 +164,10 @@ static void runNrfTest(int statusY, int hintY) {
     if (!statusOK) {
         char msg[48];
         if (statusVal == 0x00) {
-            // Bus reads all zeros — chip not powered or CS not connected
             snprintf(msg, sizeof(msg), "FAIL  STATUS=0x00 (no power?)");
             drawStatusLine(statusY, msg, TFT_RED);
             { char hint[48]; snprintf(hint, sizeof(hint), "Check 3.3V and CSN wire (GPIO %d)", NRF24_CSN); drawStatusLine(hintY, hint, TFT_YELLOW); }
         } else {
-            // 0xFF = MISO stuck high — no chip pulling line down
             snprintf(msg, sizeof(msg), "FAIL  STATUS=0xFF (MISO stuck)");
             drawStatusLine(statusY, msg, TFT_RED);
             { char hint[48]; snprintf(hint, sizeof(hint), "Check MISO (GPIO 19) and CSN (GPIO %d)", NRF24_CSN); drawStatusLine(hintY, hint, TFT_YELLOW); }
@@ -168,21 +181,114 @@ static void runNrfTest(int statusY, int hintY) {
     byte readback = rawNrfRead(0x01);   // Read it back
     rawNrfWrite(0x01, 0x00);            // Restore to disabled (our default)
 
-    if (readback == 0x3F) {
-        char msg[48];
-        snprintf(msg, sizeof(msg), "PASS  ST=0x%02X WR=0x%02X", statusVal, readback);
-        drawStatusLine(statusY, msg, TFT_GREEN);
-        tft.fillRect(0, hintY, SCREEN_WIDTH, 12, TFT_BLACK);  // Clear hint
-    } else {
+    if (readback != 0x3F) {
         char msg[48];
         snprintf(msg, sizeof(msg), "FAIL  ST=0x%02X WR=0x%02X!=0x3F", statusVal, readback);
         drawStatusLine(statusY, msg, TFT_RED);
         drawStatusLine(hintY, "Check MOSI (GPIO 23) or 3.3V sag", TFT_YELLOW);
+        return;
+    }
+
+    // SPI is good — now switch to RF24 library for spectrum + TX
+    drawStatusLine(statusY, "SPI OK. Spectrum scan...", TFT_CYAN);
+    tft.fillRect(0, hintY, SCREEN_WIDTH, 12, TFT_BLACK);
+
+    // Restore SPI bus before RF24 library takes over
+    SPI.end();
+    delay(10);
+
+    // ── STAGE 2: Spectrum scan (ported from Duggie) ──
+    // Use the global nrf24Radio object from nrf24_config.h
+    if (!nrf24Radio.begin()) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "PASS SPI  FAIL RF24 begin()");
+        drawStatusLine(statusY, msg, TFT_YELLOW);
+        drawStatusLine(hintY, "SPI works but library init failed", TFT_YELLOW);
+        return;
+    }
+
+    nrf24Radio.setAutoAck(false);
+    nrf24Radio.disableCRC();
+    nrf24Radio.setRetries(0, 0);
+    nrf24Radio.setPALevel(RF24_PA_LOW);   // Low power for RX scan
+    nrf24Radio.setDataRate(RF24_2MBPS);
+    nrf24Radio.startListening();
+
+    const int NUM_CHANNELS = 126;
+    const int NUM_SWEEPS   = 30;   // 30 sweeps (~4 seconds total)
+    uint8_t signalCount[NUM_CHANNELS];
+    memset(signalCount, 0, sizeof(signalCount));
+
+    for (int sweep = 0; sweep < NUM_SWEEPS; sweep++) {
+        for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+            nrf24Radio.setChannel(ch);
+            delayMicroseconds(200);
+            nrf24Radio.startListening();
+            delayMicroseconds(200);
+            nrf24Radio.stopListening();
+
+            if (nrf24Radio.testRPD()) {
+                if (signalCount[ch] < 255) signalCount[ch]++;
+            }
+        }
+    }
+
+    nrf24Radio.stopListening();
+
+    int activeChannels = 0;
+    uint8_t peakVal = 0;
+    int peakCh = 0;
+    for (int ch = 0; ch < NUM_CHANNELS; ch++) {
+        if (signalCount[ch] > 0) activeChannels++;
+        if (signalCount[ch] > peakVal) {
+            peakVal = signalCount[ch];
+            peakCh = ch;
+        }
+    }
+
+    // ── STAGE 3: TX attempt (ported from Duggie) ──
+    nrf24Radio.setAutoAck(true);
+    nrf24Radio.enableDynamicPayloads();
+    nrf24Radio.setRetries(5, 15);
+    nrf24Radio.setChannel(120);
+    nrf24Radio.setPALevel(RF24_PA_LOW);
+    nrf24Radio.setDataRate(RF24_1MBPS);
+
+    uint8_t testAddr[] = {0xE7, 0xE7, 0xE7, 0xE7, 0xE7};
+    nrf24Radio.openWritingPipe(testAddr);
+    nrf24Radio.openReadingPipe(1, testAddr);
+    nrf24Radio.stopListening();
+
+    uint8_t testPayload[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x42};
+    nrf24Radio.write(testPayload, sizeof(testPayload));
+    bool txOK = nrf24Radio.isChipConnected();  // Chip still alive after TX
+
+    nrf24Radio.flush_tx();
+    nrf24Radio.flush_rx();
+
+    // Clean up — full reinit then power down
+    nrf24Radio.begin();
+    nrf24Radio.powerDown();
+
+    // ── RESULTS ──
+    char msg[48];
+    if (activeChannels > 3 && txOK) {
+        snprintf(msg, sizeof(msg), "PASS  %dch peak@%d TX:OK", activeChannels, peakCh);
+        drawStatusLine(statusY, msg, TFT_GREEN);
+        tft.fillRect(0, hintY, SCREEN_WIDTH, 12, TFT_BLACK);
+    } else if (txOK) {
+        snprintf(msg, sizeof(msg), "PASS  %dch (quiet) TX:OK", activeChannels);
+        drawStatusLine(statusY, msg, TFT_GREEN);
+        drawStatusLine(hintY, "Low activity normal if no 2.4G sources", TFT_CYAN);
+    } else {
+        snprintf(msg, sizeof(msg), "WARN  %dch TX:FAIL", activeChannels);
+        drawStatusLine(statusY, msg, TFT_YELLOW);
+        drawStatusLine(hintY, "SPI+RX OK but TX attempt failed", TFT_YELLOW);
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CC1101 TEST — with smart failure diagnostics
+// CC1101 TEST — SPI check + spectrum scan + keyfob detection (from Duggie)
 // ═══════════════════════════════════════════════════════════════════════════
 
 static void runCC1101Test(int statusY, int hintY) {
@@ -226,23 +332,232 @@ static void runCC1101Test(int statusY, int hintY) {
     // Step 2: Read VERSION register (0x31) — genuine CC1101 returns 0x14
     byte version = ELECHOUSE_cc1101.SpiReadStatus(0x31);
 
-    if (version == 0x14) {
-        char msg[48];
-        snprintf(msg, sizeof(msg), "PASS  VER=0x%02X (genuine CC1101)", version);
-        drawStatusLine(statusY, msg, TFT_GREEN);
-        tft.fillRect(0, hintY, SCREEN_WIDTH, 12, TFT_BLACK);  // Clear hint
-    } else if (version > 0x00 && version != 0xFF) {
-        char msg[48];
-        snprintf(msg, sizeof(msg), "WARN  VER=0x%02X (clone chip?)", version);
-        drawStatusLine(statusY, msg, TFT_YELLOW);
-        drawStatusLine(hintY, "Works but not genuine TI CC1101", TFT_YELLOW);
-    } else {
+    if (version == 0x00 || version == 0xFF) {
         char msg[48];
         snprintf(msg, sizeof(msg), "FAIL  VER=0x%02X", version);
         drawStatusLine(statusY, msg, TFT_RED);
         drawStatusLine(hintY, "Check MISO (GPIO 19) solder joint", TFT_YELLOW);
+        return;
+    }
+
+    // SPI verified — now do SubGHz spectrum scan (from Duggie)
+    drawStatusLine(statusY, "SPI OK. Signal detect...", TFT_CYAN);
+    tft.fillRect(0, hintY, SCREEN_WIDTH, 12, TFT_BLACK);
+
+    // ── STAGE 2: Quick signal detection on 315 + 433.92 MHz ──
+    // Ported from Duggie's keyfob detection — baseline + listen
+    ELECHOUSE_cc1101.Init();
+    ELECHOUSE_cc1101.setRxBW(325.00);
+    ELECHOUSE_cc1101.SetRx();
+
+    float listenFreqs[] = {315.0, 433.92};
+    int numListen = 2;
+
+    // Measure baseline RSSI on each frequency (noise floor)
+    int baseline[2] = {-100, -100};
+    for (int f = 0; f < numListen; f++) {
+        ELECHOUSE_cc1101.setMHZ(listenFreqs[f]);
+        delay(10);
+        ELECHOUSE_cc1101.SetRx();
+        delay(10);
+        int sum = 0;
+        for (int s = 0; s < 20; s++) {
+            sum += ELECHOUSE_cc1101.getRssi();
+            delay(2);
+        }
+        baseline[f] = sum / 20;
+    }
+
+    // Listen for 3 seconds for any signal above noise floor
+    bool signalDetected = false;
+    float detectedFreq = 0;
+    int detectedRSSI = -200;
+    unsigned long listenStart = millis();
+    unsigned long listenTimeout = 3000;   // 3 second quick listen
+
+    while (millis() - listenStart < listenTimeout) {
+        for (int f = 0; f < numListen; f++) {
+            ELECHOUSE_cc1101.setMHZ(listenFreqs[f]);
+            delayMicroseconds(500);
+            ELECHOUSE_cc1101.SetRx();
+            delay(5);
+
+            for (int s = 0; s < 5; s++) {
+                int rssi = ELECHOUSE_cc1101.getRssi();
+                if (rssi > baseline[f] + 15 && rssi > -60) {
+                    signalDetected = true;
+                    detectedFreq = listenFreqs[f];
+                    detectedRSSI = rssi;
+                    break;
+                }
+                delayMicroseconds(500);
+            }
+            if (signalDetected) break;
+        }
+        if (signalDetected) break;
+    }
+
+    ELECHOUSE_cc1101.setSidle();
+
+    // ── RESULTS ──
+    char msg[48];
+    if (version == 0x14 && signalDetected) {
+        snprintf(msg, sizeof(msg), "PASS VER=0x14 %.0fMHz %ddBm", detectedFreq, detectedRSSI);
+        drawStatusLine(statusY, msg, TFT_GREEN);
+        drawStatusLine(hintY, "Genuine CC1101 + SubGHz signal!", TFT_GREEN);
+    } else if (version == 0x14) {
+        snprintf(msg, sizeof(msg), "PASS  VER=0x14 (genuine CC1101)");
+        drawStatusLine(statusY, msg, TFT_GREEN);
+        drawStatusLine(hintY, "No 315/433 signal (normal)", TFT_CYAN);
+    } else {
+        snprintf(msg, sizeof(msg), "WARN  VER=0x%02X (clone chip?)", version);
+        drawStatusLine(statusY, msg, TFT_YELLOW);
+        drawStatusLine(hintY, "Works but not genuine TI CC1101", TFT_YELLOW);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GPS TEST — Queries the RUNNING GPS module's diagnostics
+// Does NOT open its own UART2 — gps_module.cpp already owns it.
+// Just reads the existing counters to verify data is flowing.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#if CYD_HAS_GPS
+
+// Draw a HaleHound gradient progress bar (MAGENTA → HOTPINK)
+// Extracts RGB565 components at runtime since colors are extern variables.
+static void drawGradientBar(int y, int h, float progress) {
+    int barX = RT_BTN_X + 2;
+    int barW = RT_BTN_W - 4;
+    int fillW = (int)(barW * progress);
+    if (fillW < 1) fillW = 1;
+    if (fillW > barW) fillW = barW;
+
+    // Background (dark)
+    tft.fillRect(barX, y, barW, h, HALEHOUND_DARK);
+
+    // Extract RGB565 components from actual theme colors
+    uint8_t r1 = (HALEHOUND_MAGENTA >> 11) & 0x1F;
+    uint8_t g1 = (HALEHOUND_MAGENTA >> 5)  & 0x3F;
+    uint8_t b1 =  HALEHOUND_MAGENTA        & 0x1F;
+    uint8_t r2 = (HALEHOUND_HOTPINK >> 11) & 0x1F;
+    uint8_t g2 = (HALEHOUND_HOTPINK >> 5)  & 0x3F;
+    uint8_t b2 =  HALEHOUND_HOTPINK        & 0x1F;
+
+    // Gradient fill — lerp between the two colors
+    for (int x = 0; x < fillW; x++) {
+        float t = (float)x / (float)barW;
+        uint8_t r = r1 + (uint8_t)((int)(r2 - r1) * t);
+        uint8_t g = g1 + (uint8_t)((int)(g2 - g1) * t);
+        uint8_t b = b1 + (uint8_t)((int)(b2 - b1) * t);
+        uint16_t col = (r << 11) | (g << 5) | b;
+        tft.drawFastVLine(barX + x, y, h, col);
+    }
+
+    // Border
+    tft.drawRect(barX - 1, y - 1, barW + 2, h + 2, HALEHOUND_MAGENTA);
+}
+
+static void runGpsTest(int statusY, int hintY) {
+    // Clear status area
+    tft.fillRect(0, statusY, SCREEN_WIDTH, 24, TFT_BLACK);
+
+    int barY = statusY;
+    int barH = 10;
+
+    // ── PHASE 1: Initialize GPS if needed (headless — no screen jump) ──
+    Serial.end();           // Free GPIO 3 for UART2
+    delay(50);
+
+    drawStatusLine(hintY, "Initializing GPS...", HALEHOUND_GUNMETAL);
+    drawGradientBar(barY, barH, 0.1f);
+
+    gpsInitSilent();        // Pin scan + baud detect (returns fast if already init'd)
+
+    drawGradientBar(barY, barH, 0.3f);
+
+    // ── PHASE 2: Open UART2 for data collection ──
+    gpsStartBackground();
+    delay(500);
+
+    drawGradientBar(barY, barH, 0.4f);
+    drawStatusLine(hintY, "Sampling GPS data...", HALEHOUND_GUNMETAL);
+
+    // Snapshot counters BEFORE sampling
+    uint32_t charsBefore   = gpsCharsProcessed();
+    uint32_t dollarsBefore = gpsDollarsSeen();
+    uint32_t passedBefore  = gpsPassedChecksums();
+
+    // ── PHASE 3: Actively feed GPS parser for 3 seconds with animated bar ──
+    unsigned long gpsTestStart = millis();
+    while (millis() - gpsTestStart < 3000) {
+        gpsUpdate();
+        float elapsed = (float)(millis() - gpsTestStart) / 3000.0f;
+        drawGradientBar(barY, barH, 0.4f + elapsed * 0.5f);  // 0.4 → 0.9
+        delay(50);
+    }
+
+    drawGradientBar(barY, barH, 1.0f);
+
+    // Snapshot counters AFTER sampling
+    uint32_t charsAfter   = gpsCharsProcessed();
+    uint32_t dollarsAfter = gpsDollarsSeen();
+    uint32_t passedAfter  = gpsPassedChecksums();
+
+    uint32_t newChars   = charsAfter - charsBefore;
+    uint32_t newDollars = dollarsAfter - dollarsBefore;
+    uint32_t newPassed  = passedAfter - passedBefore;
+
+    int sats = gpsRawSatValue();
+    GPSStatus status = gpsGetStatus();
+    bool isC5 = gpsIsC5Connected();
+
+    // Close UART2 and clean up
+    gpsStopBackground();
+
+    // Brief pause to show full bar
+    delay(300);
+
+    // Clear bar area for results
+    tft.fillRect(0, statusY, SCREEN_WIDTH, 24, TFT_BLACK);
+
+    // ── RESULTS ──
+    char msg[48];
+
+    if (newPassed > 2) {
+        if (sats > 0) {
+            snprintf(msg, sizeof(msg), "PASS  %lu$ %dsat %s",
+                     (unsigned long)newPassed, sats, isC5 ? "C5" : "NMEA");
+            drawStatusLine(statusY, msg, TFT_GREEN);
+            if (status >= GPS_FIX_2D) {
+                drawStatusLine(hintY, "GPS has fix!", TFT_GREEN);
+            } else {
+                drawStatusLine(hintY, "Searching for fix...", TFT_CYAN);
+            }
+        } else {
+            snprintf(msg, sizeof(msg), "PASS  %lu$ 0sat (cold start?)",
+                     (unsigned long)newPassed);
+            drawStatusLine(statusY, msg, TFT_GREEN);
+            drawStatusLine(hintY, "NMEA OK, waiting for satellites", TFT_CYAN);
+        }
+    } else if (newDollars > 0) {
+        snprintf(msg, sizeof(msg), "WARN  %lu$ (checksum fail?)",
+                 (unsigned long)newDollars);
+        drawStatusLine(statusY, msg, TFT_YELLOW);
+        drawStatusLine(hintY, "Data flowing but NMEA incomplete", TFT_YELLOW);
+    } else if (newChars > 0) {
+        snprintf(msg, sizeof(msg), "WARN  %lu chars (no NMEA)",
+                 (unsigned long)newChars);
+        drawStatusLine(statusY, msg, TFT_YELLOW);
+        drawStatusLine(hintY, "Bytes but no NMEA — wrong baud?", TFT_YELLOW);
+    } else {
+        snprintf(msg, sizeof(msg), "FAIL  0 bytes in 3s");
+        drawStatusLine(statusY, msg, TFT_RED);
+        drawStatusLine(hintY, "Check GPS TX -> CYD P1 RX wiring", TFT_YELLOW);
+    }
+}
+
+#endif // CYD_HAS_GPS
 
 // ═══════════════════════════════════════════════════════════════════════════
 // WIRING DIAGRAMS — Duggie's KiCad layouts as TFT block diagrams
@@ -743,6 +1058,15 @@ static void drawMainScreen() {
     drawRadioButton(RT_CC_BTN_Y, RT_CC_BTN_H, "[ CC1101 ]", HALEHOUND_MAGENTA);
     drawStatusLine(RT_CC_STATUS_Y, "Status: --", HALEHOUND_GUNMETAL);
 
+    // GPS button and status
+#if CYD_HAS_GPS
+    drawRadioButton(RT_GPS_BTN_Y, RT_GPS_BTN_H, "[ GPS ]", HALEHOUND_MAGENTA);
+    drawStatusLine(RT_GPS_STATUS_Y, "Status: --", HALEHOUND_GUNMETAL);
+#else
+    drawRadioButton(RT_GPS_BTN_Y, RT_GPS_BTN_H, "[ GPS N/A ]", HALEHOUND_GUNMETAL);
+    drawStatusLine(RT_GPS_STATUS_Y, "GPS disabled in config", HALEHOUND_GUNMETAL);
+#endif
+
     // Wiring reference button
     drawRadioButton(RT_WIRE_BTN_Y, RT_WIRE_BTN_H, "[ WIRING ]", HALEHOUND_HOTPINK);
 
@@ -791,6 +1115,22 @@ void radioTestScreen() {
 
             delay(300);  // Debounce
         }
+
+        // Check GPS button tap
+#if CYD_HAS_GPS
+        if (isTouchInArea(RT_BTN_X, RT_GPS_BTN_Y, RT_BTN_W, RT_GPS_BTN_H)) {
+            drawRadioButton(RT_GPS_BTN_Y, RT_GPS_BTN_H, "[ GPS ]", TFT_WHITE);
+            delay(100);
+            drawRadioButton(RT_GPS_BTN_Y, RT_GPS_BTN_H, "[ GPS ]", HALEHOUND_MAGENTA);
+
+            runGpsTest(RT_GPS_STATUS_Y, RT_GPS_HINT_Y);
+
+            tft.fillRect(0, RT_HINT_Y, SCREEN_WIDTH, 14, TFT_BLACK);
+            drawCenteredText(RT_HINT_Y, "Tap again to re-test", HALEHOUND_GUNMETAL, 1);
+
+            delay(300);  // Debounce
+        }
+#endif
 
         // Check WIRING button tap
         if (isTouchInArea(RT_BTN_X, RT_WIRE_BTN_Y, RT_BTN_W, RT_WIRE_BTN_H)) {
