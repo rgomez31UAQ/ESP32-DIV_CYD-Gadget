@@ -270,6 +270,30 @@ void cleanup();
 // FindYou namespace removed — feature was not useful
 
 // ═══════════════════════════════════════════════════════════════════════════
+// BLE PREDATOR - Unified Listen / Find / Attack Module
+// Phase 1: LISTEN - Passive BLE scanning with device classification
+// Phase 2: TARGET - Detail overlay with full payload hex dump
+// Phase 3: ATTACK - Exact MAC + payload replay via raw ESP-IDF
+// Replaces BLE Scanner and BLE Sniffer with a full attack pipeline.
+// ═══════════════════════════════════════════════════════════════════════════
+
+namespace BlePredator {
+
+// Initialize BLE Predator and draw UI
+void setup();
+
+// Main loop - phase management, touch handling, display
+void loop();
+
+// Check if user requested exit
+bool isExitRequested();
+
+// Cleanup BLE resources and stop replay task
+void cleanup();
+
+}  // namespace BlePredator
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BLE DUCKY - BLE HID Keyboard Injection
 // ESP32 acts as BLE HID keyboard, injects keystrokes into paired devices
 // Uses T-vK/ESP32-BLE-Keyboard library

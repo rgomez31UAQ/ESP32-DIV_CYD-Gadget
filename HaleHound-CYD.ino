@@ -134,16 +134,14 @@ const unsigned char *wifi_submenu_icons[NUM_SUBMENU_ITEMS] = {
     bitmap_icon_go_back
 };
 
-// Bluetooth Submenu - 10 items
-const int bluetooth_NUM_SUBMENU_ITEMS = 10;
+// Bluetooth Submenu - 8 items
+const int bluetooth_NUM_SUBMENU_ITEMS = 8;
 const char *bluetooth_submenu_items[bluetooth_NUM_SUBMENU_ITEMS] = {
     "BLE Jammer",
     "BLE Spoofer",
     "BLE Beacon",
-    "Sniffer",
-    "BLE Scanner",
+    "BLE Predator",
     "WhisperPair",
-    "AirTag",
     "Lunatic Fringe",
     "BLE Ducky",
     "Back to Main Menu"
@@ -153,26 +151,26 @@ const unsigned char *bluetooth_submenu_icons[bluetooth_NUM_SUBMENU_ITEMS] = {
     bitmap_icon_ble_jammer,
     bitmap_icon_spoofer,
     bitmap_icon_signal,
-    bitmap_icon_analyzer,
-    bitmap_icon_graph,
+    bitmap_icon_analyzer,       // BLE Predator - analyzer icon
     bitmap_icon_eye,
-    bitmap_icon_apple,
-    bitmap_icon_scanner,
+    bitmap_icon_scanner,        // Lunatic Fringe (hub)
     bitmap_icon_key,            // BLE Ducky - key icon
     bitmap_icon_go_back
 };
 
-// AirTag Hub Submenu - 4 items (const * const → .rodata/flash, saves DRAM)
-const int airtag_NUM_SUBMENU_ITEMS = 4;
-static const char * const airtag_submenu_items_flash[] = {
+// Lunatic Fringe Hub Submenu - 5 items (const * const → .rodata/flash, saves DRAM)
+const int lunafringe_NUM_SUBMENU_ITEMS = 5;
+static const char * const lunafringe_submenu_items_flash[] = {
+    "Tracker Scan",
     "AirTag Detect",
     "Phantom Flood",
     "AirTag Replay",
     "Back"
 };
 
-static const unsigned char * const airtag_submenu_icons_flash[] = {
+static const unsigned char * const lunafringe_submenu_icons_flash[] = {
     bitmap_icon_scanner,
+    bitmap_icon_apple,
     bitmap_icon_nuke,
     bitmap_icon_antenna,
     bitmap_icon_go_back
@@ -925,7 +923,7 @@ void handleBluetoothSubmenuTouch() {
             displaySubmenu();
             delay(200);
 
-            if (current_submenu_index == 9) { // Back
+            if (current_submenu_index == 7) { // Back
                 returnToMainMenu();
                 return;
             }
@@ -978,29 +976,17 @@ void handleBluetoothSubmenuTouch() {
                     }
                     BleBeacon::cleanup();
                     break;
-                case 3: // Sniffer
-                    BleSniffer::setup();
+                case 3: // BLE Predator (Listen / Find / Attack)
+                    // Predator handles its own touch — no outer touchButtonsUpdate/isBackButtonTapped
+                    BlePredator::setup();
                     while (!feature_exit_requested) {
-                        BleSniffer::loop();
-                        if (BleSniffer::isExitRequested()) feature_exit_requested = true;
-                        touchButtonsUpdate();
-                        if (isBackButtonTapped()) feature_exit_requested = true;
+                        BlePredator::loop();
+                        if (BlePredator::isExitRequested()) feature_exit_requested = true;
                         if (IS_BOOT_PRESSED()) feature_exit_requested = true;
                     }
-                    BleSniffer::cleanup();
+                    BlePredator::cleanup();
                     break;
-                case 4: // BLE Scanner
-                    BleScan::setup();
-                    while (!feature_exit_requested) {
-                        BleScan::loop();
-                        if (BleScan::isExitRequested()) feature_exit_requested = true;
-                        touchButtonsUpdate();
-                        if (isBackButtonTapped()) feature_exit_requested = true;
-                        if (IS_BOOT_PRESSED()) feature_exit_requested = true;
-                    }
-                    BleScan::cleanup();
-                    break;
-                case 5: // WhisperPair (CVE-2025-36911)
+                case 4: // WhisperPair (CVE-2025-36911)
                     if (!isOffensiveAllowed()) {
                         if (blue_team_mode) { showBlueTeamBlockedScreen(); if (!showDisclaimerScreen()) break; }
                         else if (!showDisclaimerScreen()) break;
@@ -1016,19 +1002,10 @@ void handleBluetoothSubmenuTouch() {
                     }
                     WhisperPair::cleanup();
                     break;
-                case 6: // AirTag Hub — sub-submenu
-                    handleAirTagHubTouch();
+                case 5: // Lunatic Fringe (Hub — tracker detect + AirTag tools)
+                    handleLunaticFringeHubTouch();
                     break;
-                case 7: // Lunatic Fringe (Multi-platform tracker detect)
-                    LunaticFringe::setup();
-                    while (!feature_exit_requested) {
-                        LunaticFringe::loop();
-                        if (LunaticFringe::isExitRequested()) feature_exit_requested = true;
-                        if (IS_BOOT_PRESSED()) feature_exit_requested = true;
-                    }
-                    LunaticFringe::cleanup();
-                    break;
-                case 8: // BLE Ducky
+                case 6: // BLE Ducky
                     if (!isOffensiveAllowed()) {
                         if (blue_team_mode) { showBlueTeamBlockedScreen(); if (!showDisclaimerScreen()) break; }
                         else if (!showDisclaimerScreen()) break;
@@ -1053,21 +1030,22 @@ void handleBluetoothSubmenuTouch() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// AIRTAG HUB SUBMENU HANDLER
+// LUNATIC FRINGE HUB SUBMENU HANDLER
+// Contains: Tracker Scan, AirTag Detect, Phantom Flood, AirTag Replay, Back
 // ═══════════════════════════════════════════════════════════════════════════
 
-void handleAirTagHubTouch() {
-    // Swap active submenu pointers to AirTag hub arrays (cast: flash arrays are const * const)
-    active_submenu_items = (const char **)airtag_submenu_items_flash;
-    active_submenu_size = airtag_NUM_SUBMENU_ITEMS;
-    active_submenu_icons = (const unsigned char **)airtag_submenu_icons_flash;
+void handleLunaticFringeHubTouch() {
+    // Swap active submenu pointers to Lunatic Fringe hub arrays
+    active_submenu_items = (const char **)lunafringe_submenu_items_flash;
+    active_submenu_size = lunafringe_NUM_SUBMENU_ITEMS;
+    active_submenu_icons = (const unsigned char **)lunafringe_submenu_icons_flash;
     current_submenu_index = 0;
     submenu_initialized = false;
     displaySubmenu();
     delay(200);
 
-    bool in_airtag_hub = true;
-    while (in_airtag_hub) {
+    bool in_hub = true;
+    while (in_hub) {
         touchButtonsUpdate();
 
         // Icon bar back button — exit to Bluetooth menu
@@ -1075,9 +1053,9 @@ void handleAirTagHubTouch() {
             break;
         }
 
-        for (int i = 0; i < airtag_NUM_SUBMENU_ITEMS; i++) {
+        for (int i = 0; i < lunafringe_NUM_SUBMENU_ITEMS; i++) {
             int yPos = SUBMENU_Y_START + i * SUBMENU_Y_SPACING;
-            if (i == airtag_NUM_SUBMENU_ITEMS - 1) yPos += SUBMENU_LAST_GAP;
+            if (i == lunafringe_NUM_SUBMENU_ITEMS - 1) yPos += SUBMENU_LAST_GAP;
 
             if (isTouchInArea(10, yPos, SUBMENU_TOUCH_W, SUBMENU_TOUCH_H)) {
                 current_submenu_index = i;
@@ -1085,8 +1063,8 @@ void handleAirTagHubTouch() {
                 displaySubmenu();
                 delay(200);
 
-                if (current_submenu_index == 3) { // Back
-                    in_airtag_hub = false;
+                if (current_submenu_index == 4) { // Back
+                    in_hub = false;
                     break;
                 }
 
@@ -1095,7 +1073,16 @@ void handleAirTagHubTouch() {
                 waitForTouchRelease();
 
                 switch (current_submenu_index) {
-                    case 0: // AirTag Detect
+                    case 0: // Tracker Scan (multi-platform — current Lunatic Fringe)
+                        LunaticFringe::setup();
+                        while (!feature_exit_requested) {
+                            LunaticFringe::loop();
+                            if (LunaticFringe::isExitRequested()) feature_exit_requested = true;
+                            if (IS_BOOT_PRESSED()) feature_exit_requested = true;
+                        }
+                        LunaticFringe::cleanup();
+                        break;
+                    case 1: // AirTag Detect
                         AirTagDetect::setup();
                         while (!feature_exit_requested) {
                             AirTagDetect::loop();
@@ -1106,7 +1093,7 @@ void handleAirTagHubTouch() {
                         }
                         AirTagDetect::cleanup();
                         break;
-                    case 1: // Phantom Flood (FindMy BLE Flood)
+                    case 2: // Phantom Flood (FindMy BLE Flood)
                         if (!isOffensiveAllowed()) {
                             if (blue_team_mode) { showBlueTeamBlockedScreen(); if (!showDisclaimerScreen()) break; }
                             else if (!showDisclaimerScreen()) break;
@@ -1122,7 +1109,7 @@ void handleAirTagHubTouch() {
                         }
                         PhantomFlood::cleanup();
                         break;
-                    case 2: // AirTag Replay (Sniff + Replay)
+                    case 3: // AirTag Replay (Sniff + Replay)
                         if (!isOffensiveAllowed()) {
                             if (blue_team_mode) { showBlueTeamBlockedScreen(); if (!showDisclaimerScreen()) break; }
                             else if (!showDisclaimerScreen()) break;
@@ -1140,12 +1127,12 @@ void handleAirTagHubTouch() {
                         break;
                 }
 
-                // After module exits, return to AirTag hub (NOT Bluetooth menu)
+                // After module exits, return to Lunatic Fringe hub (NOT Bluetooth menu)
                 feature_active = false;
                 feature_exit_requested = false;
-                active_submenu_items = (const char **)airtag_submenu_items_flash;
-                active_submenu_size = airtag_NUM_SUBMENU_ITEMS;
-                active_submenu_icons = (const unsigned char **)airtag_submenu_icons_flash;
+                active_submenu_items = (const char **)lunafringe_submenu_items_flash;
+                active_submenu_size = lunafringe_NUM_SUBMENU_ITEMS;
+                active_submenu_icons = (const unsigned char **)lunafringe_submenu_icons_flash;
                 current_submenu_index = 0;
                 submenu_initialized = false;
                 displaySubmenu();
