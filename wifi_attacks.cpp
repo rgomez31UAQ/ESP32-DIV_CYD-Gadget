@@ -5355,25 +5355,50 @@ static bool waitForReleaseFlag = false;
 // ═══════════════════════════════════════════════════════════════════════════
 
 static bool keyboardActive = false;
-static bool shiftActive = false;
+static int keyboardMode = 0;  // 0=lower, 1=upper, 2=symbols
 static bool cursorState = false;
 static unsigned long lastCursorToggle = 0;
 static const int keyWidth = SCALE_W(22);
 static const int keyHeight = SCALE_H(18);
 static const int keySpacing = 2;
+
+// Sentinel characters for special keys (non-printable, rendered with labels)
+#define KB_SHIFT '\x01'
+#define KB_SPACE '\x02'
+#define KB_BKSP  '\x03'
+
 static const char* keyboardLower[] = {
     "1234567890",
     "qwertyuiop",
-    "asdfghjkl^",
-    "zxcvbnm_<-"
+    "asdfghjkl\x01",
+    "zxcvbnm-\x02\x03"
 };
 static const char* keyboardUpper[] = {
     "1234567890",
     "QWERTYUIOP",
-    "ASDFGHJKL^",
-    "ZXCVBNM_<-"
+    "ASDFGHJKL\x01",
+    "ZXCVBNM-\x02\x03"
+};
+static const char* keyboardSymbols[] = {
+    "!@#$%^&*()",
+    "_-.+=:;'\"~",
+    "/\\|<>?[],\x01",
+    "`{}\x02\x03"
 };
 static const char** keyboardLayout = keyboardLower;
+
+// Helper: print key label (handles sentinel chars for special keys)
+static void printKeyLabel(char c) {
+    if (c == KB_SHIFT) {
+        tft.print(keyboardMode == 0 ? "^" : keyboardMode == 1 ? "#" : "ab");
+    } else if (c == KB_SPACE) {
+        tft.print("_");
+    } else if (c == KB_BKSP) {
+        tft.print("<");
+    } else {
+        tft.print(c);
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TERMINAL DISPLAY
@@ -6261,7 +6286,7 @@ static void drawKeyboard() {
             tft.setTextColor(HALEHOUND_MAGENTA);
             tft.setTextSize(1);
             tft.setCursor(xOffset + keyWidth / 3, yOffset + keyHeight / 4);
-            tft.print(keyboardLayout[row][col]);
+            printKeyLabel(keyboardLayout[row][col]);
             xOffset += keyWidth + keySpacing;
         }
         yOffset += keyHeight + keySpacing;
@@ -6299,7 +6324,7 @@ static void drawKeyboard() {
     tft.setTextColor(HALEHOUND_GUNMETAL);
     tft.setTextSize(1);
     tft.setCursor(5, SCALE_Y(198));
-    tft.print("^ Shift  < Bksp  - Clear  _ Space");
+    tft.print("^ Mode  _ Space  < Bksp  - Dash");
 }
 
 // Handle keyboard touch input
@@ -6308,6 +6333,8 @@ static void handleKeyboard(int x, int y) {
     if (y >= (ICON_BAR_Y - 2) && y <= (ICON_BAR_BOTTOM + 4) && x >= 5 && x <= 30) {
         currentScreen = SCREEN_MAIN;
         keyboardActive = false;
+        keyboardMode = 0;
+        keyboardLayout = keyboardLower;
         inputSSID = "";
         waitForReleaseFlag = true;
         drawMainScreen();
@@ -6327,29 +6354,28 @@ static void handleKeyboard(int x, int y) {
                 tft.fillRect(xOffset, yOffset, keyWidth, keyHeight, HALEHOUND_HOTPINK);
                 tft.setTextColor(HALEHOUND_BLACK);
                 tft.setCursor(xOffset + 7, yOffset + 5);
-                tft.print(c);
+                printKeyLabel(c);
                 delay(80);
                 tft.fillRect(xOffset, yOffset, keyWidth, keyHeight, HALEHOUND_DARK);
                 tft.drawRect(xOffset, yOffset, keyWidth, keyHeight, HALEHOUND_GUNMETAL);
                 tft.setTextColor(HALEHOUND_MAGENTA);
                 tft.setCursor(xOffset + 7, yOffset + 5);
-                tft.print(c);
+                printKeyLabel(c);
 
                 // Handle special keys
-                if (c == '<') {  // Backspace
+                if (c == KB_BKSP) {  // Backspace
                     if (inputSSID.length() > 0) {
                         inputSSID = inputSSID.substring(0, inputSSID.length() - 1);
                     }
-                } else if (c == '-') {  // Clear
-                    inputSSID = "";
-                } else if (c == '^') {  // Shift
-                    shiftActive = !shiftActive;
-                    keyboardLayout = shiftActive ? keyboardUpper : keyboardLower;
+                } else if (c == KB_SHIFT) {  // Cycle: lower -> upper -> symbols -> lower
+                    keyboardMode = (keyboardMode + 1) % 3;
+                    keyboardLayout = (keyboardMode == 0) ? keyboardLower :
+                                     (keyboardMode == 1) ? keyboardUpper : keyboardSymbols;
                     drawKeyboard();
                     return;
-                } else if (c == '_') {  // Space
+                } else if (c == KB_SPACE) {  // Space
                     if (inputSSID.length() < 30) inputSSID += " ";
-                } else {
+                } else {  // All other chars are literal (including - . _ etc.)
                     if (inputSSID.length() < 30) inputSSID += c;
                 }
                 drawInputField();
@@ -6369,6 +6395,8 @@ static void handleKeyboard(int x, int y) {
     if (x >= 5 && x <= (5 + kbBtnW) && y >= btnY && y <= btnY + kbBtnH + 3) {
         currentScreen = SCREEN_MAIN;
         keyboardActive = false;
+        keyboardMode = 0;
+        keyboardLayout = keyboardLower;
         inputSSID = "";
         waitForReleaseFlag = true;
         drawMainScreen();
@@ -6396,6 +6424,8 @@ static void handleKeyboard(int x, int y) {
             saveSSID(inputSSID.c_str());
             currentScreen = SCREEN_MAIN;
             keyboardActive = false;
+            keyboardMode = 0;
+            keyboardLayout = keyboardLower;
             waitForReleaseFlag = true;
             drawMainScreen();
         }

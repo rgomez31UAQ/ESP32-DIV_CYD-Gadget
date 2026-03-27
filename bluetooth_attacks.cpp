@@ -10107,7 +10107,7 @@ static void handleReconTouch() {
     bpWaitForRelease = true;
 
     // Icon bar back → abort RECON
-    if (ty >= ICON_BAR_Y && ty <= ICON_BAR_BOTTOM + 4) {
+    if (ty >= ICON_BAR_TOUCH_TOP && ty <= ICON_BAR_TOUCH_BOTTOM) {
         // RECON is synchronous so this handler only runs between phases.
         // If we get here, RECON must have completed — just go back.
         goBackToListen();
@@ -10968,33 +10968,30 @@ static void handleHoneypotTouch() {
     bpWaitForRelease = true;
 
     // Icon bar back → stop honeypot
-    if (ty >= ICON_BAR_Y && ty <= ICON_BAR_BOTTOM + 4) {
+    if (ty >= ICON_BAR_TOUCH_TOP && ty <= ICON_BAR_TOUCH_BOTTOM) {
         stopHoneypot();
         return;
     }
 
-    // Bottom buttons: STOP / SAVE / CLEAR (match drawHoneypotStatic layout)
-    int btnW = SCALE_W(65);
-    int btnH = SCALE_H(26);
-    int btnY = SCREEN_HEIGHT - SCALE_H(32);
-    int stopX  = SCALE_X(5);
-    int saveX  = SCALE_X(80);
-    int clearX = SCALE_X(160);
+    // Bottom buttons: STOP / SAVE / CLEAR — 3-zone split for robust touch
+    int btnY = SCREEN_HEIGHT - SCALE_H(36);
+    int btnH = SCALE_H(36);
+    int zoneW = SCREEN_WIDTH / 3;
 
-    if (ty >= btnY && ty <= btnY + btnH) {
-        // STOP
-        if (tx >= stopX && tx <= stopX + btnW) {
+    if (ty >= btnY - 5 && ty <= btnY + btnH) {
+        // Left zone → STOP
+        if (tx < zoneW) {
             stopHoneypot();
             return;
         }
-        // SAVE
-        if (tx >= saveX && tx <= saveX + btnW) {
+        // Center zone → SAVE
+        if (tx >= zoneW && tx < zoneW * 2) {
             hpSetStatus("Saving to SD...", HALEHOUND_MAGENTA);
             hpSaveLootToSD();
             return;
         }
-        // CLEAR
-        if (tx >= clearX && tx <= clearX + btnW) {
+        // Right zone → CLEAR
+        if (tx >= zoneW * 2) {
             S->hpLootCount = 0;
             S->hpLootScroll = 0;
             S->hpConnCount = 0;
@@ -11225,23 +11222,33 @@ static void drawDeviceList() {
     // Footer — page indicator + hint
     int footY = SCALE_Y(295);
     tft.fillRect(0, footY, SCREEN_WIDTH, SCALE_H(25), HALEHOUND_GUNMETAL);
-    tft.setTextColor(HALEHOUND_MAGENTA, HALEHOUND_GUNMETAL);
     int filtered = bpCountFiltered();
     int totalPages = (filtered + BP_MAX_VISIBLE - 1) / BP_MAX_VISIBLE;
     if (totalPages < 1) totalPages = 1;
     int curPage = (S->listStartIndex / BP_MAX_VISIBLE) + 1;
+    int textY = footY + SCALE_H(8);
     if (totalPages > 1) {
-        // Show page nav: < 2/7 >   TAP=Target
-        tft.setCursor(SCALE_X(5), footY + SCALE_H(8));
-        tft.print("<");
-        tft.setCursor(SCALE_X(18), footY + SCALE_H(8));
-        tft.printf("%d/%d", curPage, totalPages);
-        tft.setCursor(SCALE_X(55), footY + SCALE_H(8));
-        tft.print(">");
-        tft.setCursor(SCALE_X(80), footY + SCALE_H(8));
-        tft.print("TAP=Target LONG=Sel");
+        // Left half = PREV button, right half = NEXT button (matches touch zones)
+        // PREV: left side with < arrow
+        tft.setTextColor(curPage > 1 ? HALEHOUND_HOTPINK : HALEHOUND_GUNMETAL, HALEHOUND_GUNMETAL);
+        tft.setCursor(5, textY);
+        tft.print("< PREV");
+
+        // Page indicator centered
+        tft.setTextColor(HALEHOUND_MAGENTA, HALEHOUND_GUNMETAL);
+        char pgBuf[8];
+        snprintf(pgBuf, sizeof(pgBuf), "%d/%d", curPage, totalPages);
+        int pgW = strlen(pgBuf) * 6;  // approx char width
+        tft.setCursor((SCREEN_WIDTH - pgW) / 2, textY);
+        tft.print(pgBuf);
+
+        // NEXT: right side with > arrow
+        tft.setTextColor(curPage < totalPages ? HALEHOUND_HOTPINK : HALEHOUND_GUNMETAL, HALEHOUND_GUNMETAL);
+        tft.setCursor(SCREEN_WIDTH - 42, textY);
+        tft.print("NEXT >");
     } else {
-        tft.setCursor(SCALE_X(5), footY + SCALE_H(8));
+        tft.setTextColor(HALEHOUND_MAGENTA, HALEHOUND_GUNMETAL);
+        tft.setCursor(5, textY);
         tft.print("TAP=Target  LONG=Select");
     }
 }
@@ -11602,17 +11609,21 @@ static void handleListenTouch() {
     if (millis() - S->lastIconTap < 350) return;
     S->lastIconTap = millis();
 
-    // ── Icon bar ──────────────────────────────────────────────────────────
-    if (ty >= ICON_BAR_Y && ty <= ICON_BAR_BOTTOM + 4) {
+    // ── Icon bar — equal zones for reliable touch on all screens ─────────
+    if (ty >= ICON_BAR_TOUCH_TOP && ty <= ICON_BAR_TOUCH_BOTTOM) {
         bpWaitForRelease = true;
 
-        // Back
-        if (tx >= SCALE_X(5) && tx < SCALE_X(35)) {
+        // 5 icon zones: Back | Scan | FilterL | FilterR | Speed
+        // BLE indicator (rightmost) is display-only, no touch action
+        int zw = SCREEN_WIDTH / 5;
+
+        // Back (zone 0)
+        if (tx < zw) {
             S->exitRequested = true;
             return;
         }
-        // Scan toggle
-        if (tx >= SCALE_X(45) && tx < SCALE_X(75)) {
+        // Scan toggle (zone 1)
+        if (tx >= zw && tx < zw * 2) {
             if (S->scanning) {
                 S->scanning = false;
                 if (S->pScan) S->pScan->stop();
@@ -11623,24 +11634,24 @@ static void handleListenTouch() {
             drawIconBar();
             return;
         }
-        // Filter left
-        if (tx >= SCALE_X(90) && tx < SCALE_X(120)) {
+        // Filter left (zone 2)
+        if (tx >= zw * 2 && tx < zw * 3) {
             S->filter = (PredFilter)((S->filter + PF_COUNT - 1) % PF_COUNT);
             S->listStartIndex = 0;
             S->currentIndex = 0;
             drawDeviceList();
             return;
         }
-        // Filter right
-        if (tx >= SCALE_X(125) && tx < SCALE_X(155)) {
+        // Filter right (zone 3)
+        if (tx >= zw * 3 && tx < zw * 4) {
             S->filter = (PredFilter)((S->filter + 1) % PF_COUNT);
             S->listStartIndex = 0;
             S->currentIndex = 0;
             drawDeviceList();
             return;
         }
-        // Speed (dwell cycle)
-        if (tx >= SCALE_X(165) && tx < SCALE_X(195)) {
+        // Speed (zone 4)
+        if (tx >= zw * 4) {
             S->dwellIndex = (S->dwellIndex + 1) % BP_DWELL_COUNT;
             S->replayDwellMs = dwellPresets[S->dwellIndex];
             drawDeviceList();  // Refresh stats line showing dwell
@@ -11654,6 +11665,7 @@ static void handleListenTouch() {
     int listBotY = SCALE_Y(280);
     if (ty >= listTopY && ty < listBotY && S->deviceCount > 0) {
         int tappedRow = (ty - listTopY) / BP_ITEM_HEIGHT;
+        if (tappedRow >= BP_MAX_VISIBLE) tappedRow = BP_MAX_VISIBLE - 1;  // Clamp to visible rows
         int newIdx = S->listStartIndex + tappedRow;
         int filtered = bpCountFiltered();
         if (newIdx >= filtered) return;
@@ -11689,8 +11701,8 @@ static void handleListenTouch() {
         return;
     }
 
-    // ── Footer area (scroll pages) ────────────────────────────────────────
-    if (ty >= SCALE_Y(295)) {
+    // ── Footer area (scroll pages) — includes stats line for larger touch target
+    if (ty >= listBotY) {
         bpWaitForRelease = true;
         int filtered = bpCountFiltered();
         if (tx < SCREEN_WIDTH / 2) {
@@ -11733,22 +11745,19 @@ static void handleTargetTouch() {
     bpWaitForRelease = true;
 
     // Icon bar back → return to LISTEN (NOT exit module)
-    if (ty >= ICON_BAR_Y && ty <= ICON_BAR_BOTTOM + 4) {
+    if (ty >= ICON_BAR_TOUCH_TOP && ty <= ICON_BAR_TOUCH_BOTTOM) {
         goBackToListen();
         return;
     }
 
-    // REPLAY / HONEYPOT / BACK buttons — use saved Y position
+    // REPLAY / HONEYPOT / BACK buttons — 3-zone split for robust touch on all screens
     int btnY = S->targetBtnY;
-    int btnH = SCALE_H(24);
-    int btnW = SCALE_W(60);
-    int replayX  = SCALE_X(5);
-    int hpotX    = SCALE_X(80);
-    int backX    = SCALE_X(160);
+    int btnH = SCALE_H(30);  // Generous Y hit area
+    int zoneW = SCREEN_WIDTH / 3;
 
-    if (ty >= btnY && ty <= btnY + btnH) {
-        // REPLAY button (same as old ATTACK)
-        if (tx >= replayX && tx <= replayX + btnW) {
+    if (ty >= btnY - 5 && ty <= btnY + btnH) {
+        // Left zone → REPLAY
+        if (tx < zoneW) {
             if (!::isOffensiveAllowed()) return;
 
             int realIdx = bpFilteredToReal(S->detailIdx);
@@ -11764,8 +11773,8 @@ static void handleTargetTouch() {
             return;
         }
 
-        // HONEYPOT button → start RECON phase
-        if (tx >= hpotX && tx <= hpotX + btnW + SCALE_W(10)) {
+        // Center zone → HONEYPOT
+        if (tx >= zoneW && tx < zoneW * 2) {
             if (!::isOffensiveAllowed()) return;
 
             int realIdx = bpFilteredToReal(S->detailIdx);
@@ -11781,8 +11790,8 @@ static void handleTargetTouch() {
             return;
         }
 
-        // BACK button
-        if (tx >= backX && tx <= backX + btnW) {
+        // Right zone → BACK
+        if (tx >= zoneW * 2) {
             goBackToListen();
             return;
         }
@@ -11802,29 +11811,21 @@ static void handleAttackTouch() {
     S->lastIconTap = millis();
     bpWaitForRelease = true;
 
-    // Icon bar
-    if (ty >= ICON_BAR_Y && ty <= ICON_BAR_BOTTOM + 4) {
-        // Back
-        if (tx >= SCALE_X(5) && tx < SCALE_X(35)) {
+    // Icon bar — 3-zone: Back/Stop | Speed | (unused)
+    if (ty >= ICON_BAR_TOUCH_TOP && ty <= ICON_BAR_TOUCH_BOTTOM) {
+        // Left half → stop replay (Back + Stop both do same thing)
+        if (tx < SCREEN_WIDTH / 2) {
             stopReplay();
             return;
         }
-        // Stop
-        if (tx >= SCALE_X(45) && tx < SCALE_X(75)) {
-            stopReplay();
-            return;
-        }
-        // Speed cycle
-        if (tx >= SCALE_X(90) && tx < SCALE_X(120)) {
-            S->dwellIndex = (S->dwellIndex + 1) % BP_DWELL_COUNT;
-            S->replayDwellMs = dwellPresets[S->dwellIndex];
-            // Redraw dwell indicator
-            tft.setTextSize(1);
-            tft.setTextColor(HALEHOUND_MAGENTA, HALEHOUND_BLACK);
-            tft.setCursor(5, SCALE_Y(108));
-            tft.printf("DWELL: %dms    ", S->replayDwellMs);
-            return;
-        }
+        // Right half → speed cycle
+        S->dwellIndex = (S->dwellIndex + 1) % BP_DWELL_COUNT;
+        S->replayDwellMs = dwellPresets[S->dwellIndex];
+        tft.setTextSize(1);
+        tft.setTextColor(HALEHOUND_MAGENTA, HALEHOUND_BLACK);
+        tft.setCursor(5, SCALE_Y(108));
+        tft.printf("DWELL: %dms    ", S->replayDwellMs);
+        return;
     }
 }
 
