@@ -7,7 +7,11 @@
 #include "utils.h"
 #include "shared.h"
 #include "gps_module.h"
-#include "battery_monitor.h"
+#if __has_include("battery_monitor.h")
+  #include "battery_monitor.h"
+#else
+  static inline void drawBatteryIndicator(int x, int y) { (void)x; (void)y; }
+#endif
 #include <EEPROM.h>
 #include <SPI.h>
 

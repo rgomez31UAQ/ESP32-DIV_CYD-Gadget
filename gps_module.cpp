@@ -11,7 +11,46 @@
 #include "utils.h"
 #include "touch_buttons.h"
 #include "icon.h"
-#include "hlp_protocol.h"
+#if __has_include("hlp_protocol.h")
+  #include "hlp_protocol.h"
+  #define HAS_HLP_PROTOCOL 1
+#else
+  #define HAS_HLP_PROTOCOL 0
+  // Stub out HLP types/constants so GPS module compiles without C5 support
+  #define HLP_SYNC_BYTE       0xFE
+  #define HLP_MAX_PAYLOAD      1024
+  #define HLP_FRAME_OVERHEAD   5
+  #ifndef HLP_BAUD
+  #define HLP_BAUD             460800
+  #endif
+  #define HLP_HEARTBEAT        0x01
+  #define HLP_PING             0x06
+  #define HLP_PONG             0x07
+  #define HLP_GPS_DATA         0x10
+  #define HLP_GPS_STATUS       0x13
+  #define HLP_VERSION          0x04
+  struct __attribute__((packed)) HlpGpsData {
+      int32_t lat_e7; int32_t lon_e7; int32_t alt_cm;
+      uint16_t speed_dmph; uint16_t course_d10;
+      uint8_t satellites; uint8_t fix_type; uint16_t hdop_d100;
+      uint16_t year; uint8_t month; uint8_t day;
+      uint8_t hour; uint8_t minute; uint8_t second;
+      uint8_t valid; uint32_t age_ms; uint32_t chars_processed;
+  };
+  struct __attribute__((packed)) HlpHeartbeat {
+      uint32_t uptime_ms; uint32_t heap_free; uint8_t status;
+  };
+  enum HlpParseState { HLP_WAIT_SYNC, HLP_WAIT_TYPE, HLP_WAIT_LEN_H, HLP_WAIT_LEN_L, HLP_WAIT_PAYLOAD, HLP_WAIT_CRC };
+  struct HlpParser {
+      HlpParseState state; uint8_t type; uint16_t payloadLen; uint16_t payloadIdx;
+      uint8_t payload[HLP_MAX_PAYLOAD];
+      void reset() { state = HLP_WAIT_SYNC; type = 0; payloadLen = 0; payloadIdx = 0; }
+      bool feed(uint8_t) { return false; }  // Never parses — C5 never detected
+  };
+  static inline uint16_t hlpBuildFrame(uint8_t* buf, uint8_t type, const uint8_t* payload, uint16_t payloadLen) {
+      (void)buf; (void)type; (void)payload; (void)payloadLen; return 0;
+  }
+#endif
 #include <TinyGPSPlus.h>
 
 #ifndef DEG_TO_RAD

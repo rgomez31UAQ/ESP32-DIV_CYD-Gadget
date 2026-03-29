@@ -50,7 +50,18 @@
 #include "loot_manager.h"
 #include "rfid_attacks.h"
 #include "jam_detect.h"
-#include "battery_monitor.h"
+#if __has_include("battery_monitor.h")
+  #include "battery_monitor.h"
+#else
+  // Stubs — battery monitor not present in this build
+  static inline void batteryInit() {}
+  static inline void batteryUpdate() {}
+  static inline int  batteryGetPercent() { return -1; }
+  static inline int  batteryGetVoltage() { return 0; }
+  static inline bool batteryIsLow() { return false; }
+  static inline bool batteryIsCritical() { return false; }
+  static inline void drawBatteryIndicator(int x, int y) { (void)x; (void)y; }
+#endif
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GLOBAL OBJECTS
